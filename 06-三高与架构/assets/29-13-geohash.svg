@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 608" width="760" height="608" font-family="PingFang SC, Microsoft YaHei, Noto Sans CJK SC, sans-serif">
+<rect width="760" height="608" fill="#ffffff"/>
+<text x="380.0" y="32.0" text-anchor="middle" font-size="16" fill="#111827" font-weight="bold">GeoHash 九宫格：为什么要查周围 8 个格子（6 位精度，北京附近，按真实坐标绘制）</text>
+<rect x="80.0" y="70.0" width="200.0" height="129.5" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+<text x="272.0" y="189.5" text-anchor="end" font-size="13" fill="#4b5563">wx4g07</text>
+<rect x="280.0" y="70.0" width="200.0" height="129.5" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+<text x="472.0" y="189.5" text-anchor="end" font-size="13" fill="#4b5563">wx4g0e</text>
+<rect x="480.0" y="70.0" width="200.0" height="129.5" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+<text x="672.0" y="189.5" text-anchor="end" font-size="13" fill="#4b5563">wx4g0g</text>
+<rect x="80.0" y="199.5" width="200.0" height="129.5" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+<text x="272.0" y="319.0" text-anchor="end" font-size="13" fill="#4b5563">wx4g06</text>
+<rect x="280.0" y="199.5" width="200.0" height="129.5" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+<text x="472.0" y="319.0" text-anchor="end" font-size="13" fill="#1d4ed8" font-weight="bold">wx4g0d</text>
+<rect x="480.0" y="199.5" width="200.0" height="129.5" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+<text x="672.0" y="319.0" text-anchor="end" font-size="13" fill="#4b5563">wx4g0f</text>
+<rect x="80.0" y="329.0" width="200.0" height="129.5" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+<text x="272.0" y="448.5" text-anchor="end" font-size="13" fill="#4b5563">wx4g03</text>
+<rect x="280.0" y="329.0" width="200.0" height="129.5" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+<text x="472.0" y="448.5" text-anchor="end" font-size="13" fill="#4b5563">wx4g09</text>
+<rect x="480.0" y="329.0" width="200.0" height="129.5" fill="#f3f4f6" stroke="#9ca3af" stroke-width="1.2"/>
+<text x="672.0" y="448.5" text-anchor="end" font-size="13" fill="#4b5563">wx4g0c</text>
+<circle cx="464.0" cy="257.8" r="106.6" fill="none" stroke="#ea580c" stroke-width="1.6" stroke-dasharray="6 4"/>
+<text x="464.0" y="145.2" text-anchor="middle" font-size="12" fill="#c2410c">搜索半径 500 米</text>
+<circle cx="464.0" cy="257.8" r="6" fill="#2563eb"/>
+<text x="454.0" y="262.8" text-anchor="end" font-size="13" fill="#2563eb" font-weight="bold">A 查询者</text>
+<circle cx="486.0" cy="264.3" r="6" fill="#16a34a"/>
+<text x="496.0" y="269.3" text-anchor="start" font-size="13" fill="#16a34a" font-weight="bold">B</text>
+<circle cx="296.0" cy="257.8" r="6" fill="#7c3aed"/>
+<text x="306.0" y="262.8" text-anchor="start" font-size="13" fill="#7c3aed" font-weight="bold">C</text>
+<text x="80.0" y="494.5" text-anchor="start" font-size="13" fill="#111827">· A 和 B 只相距约 108 米，但 B 落在东边的格子里，GeoHash 前缀不同。</text>
+<text x="80.0" y="520.5" text-anchor="start" font-size="13" fill="#111827">· A 和 C 在同一个格子（前缀相同），却相距约 787 米。</text>
+<text x="80.0" y="546.5" text-anchor="start" font-size="13" fill="#111827">· 所以"前缀相同 = 距离近"并不总成立：要查中心格子 + 周围 8 个格子，再精确计算距离过滤。</text>
+<text x="80.0" y="572.5" text-anchor="start" font-size="13" fill="#111827">· 每个格子约 938 米 × 607 米；格子的短边不小于搜索半径时，九宫格才能覆盖整个圆。</text>
+</svg>
