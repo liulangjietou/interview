@@ -12,7 +12,7 @@ flowchart LR
     ROOT["Spring"] --> IOC["IoC 容器<br/>refresh 流程 · Bean 生命周期 · 扩展点 · 循环依赖"]
     ROOT --> AOP["AOP<br/>代理创建 · 通知链"]
     ROOT --> TX["事务<br/>原理 · 传播行为 · 失效场景 · 事务事件"]
-    ROOT --> MVC["Web MVC<br/>DispatcherServlet"]
+    ROOT --> MVC["Web<br/>DispatcherServlet · 异常处理<br/>参数校验 · WebFlux"]
     ROOT --> BOOT["Spring Boot<br/>自动配置 · 启动流程 · Starter · 配置"]
     ROOT --> MISC["事件 · @Async"]
     ROOT --> NEW["版本演进<br/>Spring 6 / 7 · Boot 3 / 4"]
@@ -38,6 +38,9 @@ flowchart LR
 | 05-12 | @Transactional 失效的常见场景 | ★★★ | 资深 |
 | 05-13 | 事务中发 MQ、调远程接口，如何保证一致性？ | ★★★ | 架构师 |
 | 05-14 | Spring MVC 的请求处理流程 | ★★ | 资深 |
+| 05-22 | 全局异常处理是怎么实现的？Filter、拦截器、AOP 里抛的异常它都能接住吗？ | ★★ | 资深 |
+| 05-23 | 参数校验怎么做？`@Valid` 和 `@Validated` 有什么区别？校验为什么会不生效？ | ★★ | 资深 |
+| 05-24 | WebFlux 和 Spring MVC 有什么区别？有了虚拟线程，还需要响应式吗？ | ★★★ | 资深 / 架构师 |
 | 05-15 | Spring Boot 自动配置的原理 | ★★★ | 资深 |
 | 05-16 | Spring Boot 的启动流程 | ★★ | 资深 |
 | 05-17 | 如何设计一个自定义 Starter？ | ★★ | 架构师 |
@@ -668,7 +671,7 @@ Spring 在 `TransactionSynchronization.afterCommit` 的文档中明确说明了�
 
 ---
 
-## 三、Web MVC
+## 三、Web
 
 ### 05-14 Spring MVC 的请求处理流程
 
@@ -728,6 +731,263 @@ sequenceDiagram
    请求体是一个输入流，只能读一次。需要多次读取时，用 `ContentCachingRequestWrapper` 之类的包装类先缓存。
 2. **Spring 7 在 Web 层有什么新能力？**
    原生支持 **API 版本控制**：`@RequestMapping` 新增了 `version` 属性（已核对 spring-web 7.0.6），配合版本解析策略（请求头、路径、参数、媒体类型），可以把同一个路径的不同版本路由到不同的方法。
+
+---
+
+### 05-22 全局异常处理是怎么实现的？Filter、拦截器、AOP 里抛的异常它都能接住吗？
+
+> ★★ ｜ 资深 ｜ 高频
+
+**考察意图**：几乎每个项目都写了 `@RestControllerAdvice`，但"哪些异常它接不住""多个处理方法怎么选"才是区分度所在。
+
+**30 秒版回答**
+
+- `@ControllerAdvice` + `@ExceptionHandler` 由 `ExceptionHandlerExceptionResolver` 实现。它是 `DispatcherServlet` 里的一个 `HandlerExceptionResolver`，**只能处理 `DispatcherServlet.doDispatch` 内部抛出的异常**。
+- 一次请求从外到内的顺序：**Filter → DispatcherServlet → 拦截器 preHandle → 参数解析与校验 → AOP 切面 → Controller 方法**。
+- 能不能接住，看异常抛在哪一层：
+  - 拦截器的 `preHandle` / `postHandle`、参数解析、参数校验、切面、Controller：都在 `doDispatch` 的 try 块里，**能接住**；
+  - **Filter 里抛的异常接不住**，它在 `DispatcherServlet` 之外。Spring Security 的认证、鉴权异常就属于这一类，由它自己的 `ExceptionTranslationFilter` 处理；
+  - 拦截器的 `afterCompletion` 里抛的异常只会被记录日志，不影响响应。
+- 默认注册了三个异常解析器，按顺序尝试（已核对 spring-webmvc 7.0.6）：`ExceptionHandlerExceptionResolver` → `ResponseStatusExceptionResolver`（处理 `@ResponseStatus`）→ `DefaultHandlerExceptionResolver`（把 Spring 自己的异常翻译成 400、405、415 等状态码）。
+
+**深入剖析**
+
+```mermaid
+flowchart TD
+    A["Filter 链<br/>含 Spring Security"] --> B["DispatcherServlet.doDispatch"]
+    B --> C["拦截器 preHandle"]
+    C --> D["参数解析与校验"]
+    D --> E["AOP 切面"]
+    E --> F["Controller 方法"]
+    F --> G["拦截器 postHandle"]
+    C & D & E & F & G -->|"抛出异常"| H["HandlerExceptionResolver<br/>@ExceptionHandler 在这里生效"]
+    A -->|"抛出异常"| I["Servlet 容器的错误处理<br/>Spring Boot 转发到 /error"]
+```
+
+**匹配规则**（已核对 `ExceptionHandlerExceptionResolver` 和 `ExceptionHandlerMethodResolver` 源码）：
+
+1. **先找 Controller 自己的 `@ExceptionHandler` 方法**，找不到再按顺序遍历各个 `@ControllerAdvice`；
+2. 在同一个类里，如果多个方法都能处理，选**继承层次上离实际异常最近**的那个；
+3. 按实际异常类型找不到时，会**沿着 cause 链继续找**。所以被包装过的业务异常也可能被匹配到；
+4. 多个 `@ControllerAdvice` 之间按 `@Order` 排序，**第一个能处理的就用它，不会跨类比较谁更精确**。
+
+第 4 条是最常见的坑：一个优先级高的 advice 里写了 `@ExceptionHandler(Exception.class)` 兜底，另一个 advice 里针对 `BizException` 的处理方法就永远执行不到。兜底处理要放在优先级最低的 advice 里。
+
+推荐写法（示意代码，未编译）：
+
+```java
+@Slf4j
+@RestControllerAdvice
+public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
+
+    /** 业务异常：是预期内的失败，记录 info 即可 */
+    @ExceptionHandler(BizException.class)
+    public ProblemDetail handleBiz(BizException e) {
+        log.info("business rule rejected, errorCode={}", e.getErrorCode());
+        ProblemDetail detail = ProblemDetail.forStatusAndDetail(HttpStatus.UNPROCESSABLE_ENTITY, e.getMessage());
+        detail.setProperty(ERROR_CODE_KEY, e.getErrorCode());
+        return detail;
+    }
+
+    /** 兜底：不把内部异常信息返回给调用方 */
+    @ExceptionHandler(Exception.class)
+    public ProblemDetail handleUnknown(Exception e, HttpServletRequest request) {
+        log.error("unexpected error, errorCode={}, uri={}", ErrorCode.SYSTEM_ERROR, request.getRequestURI(), e);
+        return ProblemDetail.forStatusAndDetail(HttpStatus.INTERNAL_SERVER_ERROR, SYSTEM_ERROR_MESSAGE);
+    }
+}
+```
+
+- `ResponseEntityExceptionHandler` 是 Spring 提供的基类，已经为参数缺失、类型不匹配、请求体不可读、校验失败等二十来种框架异常准备了处理方法，继承它就能统一这些响应的格式。
+- `ProblemDetail` 是 Spring 6.0 引入的错误响应体，对应 RFC 9457。Spring Boot 中通过 `spring.mvc.problemdetails.enabled=true` 让框架异常也输出这种格式（已核对 Spring Boot 4.0.4 的配置元数据）。
+
+**追问链**
+
+1. **Filter 里的异常想走统一的错误格式，怎么办？**
+   两种做法：
+   - 在 Filter 里注入名为 `handlerExceptionResolver` 的 Bean，catch 住异常后手动调用它的 `resolveException`，让异常进入同一套 `@ExceptionHandler`；
+   - 不处理，让异常到达容器，由 Spring Boot 的 `/error` 端点输出，再自定义 `ErrorAttributes` 统一格式。
+   认证类 Filter 更常见的做法是直接写响应并 return，不抛异常。
+2. **访问一个不存在的路径，`@ExceptionHandler` 能处理吗？**
+   能。Spring 7 的 `DispatcherServlet` 找不到处理器时直接抛 `NoHandlerFoundException`（已核对 7.0.6 源码）；静态资源找不到抛 `NoResourceFoundException`（6.1 引入）。老版本需要设置 `throwExceptionIfNoHandlerFound=true` 才会抛，这个开关在 7.0 的源码里已经没有了。
+3. **想在拦截器的 `postHandle` 里给响应加个头，为什么不生效？**
+   `@ResponseBody` 的返回值在 `HandlerAdapter` 里就已经写出并提交了响应，`postHandle` 执行时已经晚了。要改响应体或响应头，实现 `ResponseBodyAdvice`，它在消息转换器写出之前被调用。
+4. **参数校验失败时，切面为什么没有执行？**
+   参数解析和校验发生在 `HandlerAdapter` 调用 Controller 代理对象**之前**。校验不通过，方法根本没被调用，切面自然不会触发。想统计所有请求（包括校验失败的），要放在拦截器或 Filter 里。
+
+**生产实践 / 踩坑**
+
+- **兜底处理把异常信息原样返回**：`e.getMessage()` 里可能有 SQL、表名、内部地址。兜底分支只返回固定文案和错误码，详细信息只进日志。
+- **业务异常也打 error 并带堆栈**：余额不足、库存不够这类预期内的失败会淹没真正的错误。业务异常记 info，不要堆栈；未知异常记 error，带堆栈。分类原则见[《最佳实践 · 项目工程开发》](../最佳实践/01-项目工程开发最佳实践.md)。
+- **异步请求**：Controller 返回 `CompletableFuture` 或 `DeferredResult` 时，异步阶段的异常会重新派发回 `DispatcherServlet`，仍然能被 `@ExceptionHandler` 处理；但 `@Async` 方法里的异常和 Controller 没有关系，不会走到这里，见 05-20。
+
+---
+
+### 05-23 参数校验怎么做？`@Valid` 和 `@Validated` 有什么区别？校验为什么会不生效？
+
+> ★★ ｜ 资深 ｜ 高频
+
+**考察意图**：看你是否清楚校验在请求处理的哪一步发生、失败时抛什么异常，以及能否系统地说出"加了注解却没校验"的原因。
+
+**30 秒版回答**
+
+- 规范是 Jakarta Bean Validation，实现是 Hibernate Validator。Spring Boot 需要单独引入 `spring-boot-starter-validation`，Web 的 starter 里不带。
+- `@Valid` 是规范里的注解，可以标在字段上触发**嵌套校验**；`@Validated` 是 Spring 的注解，支持**分组**，标在类上还能开启**方法级校验**（基于 AOP）。
+- 三种校验位置，对应三种异常：
+
+| 写法 | 谁来校验 | 失败时抛出 |
+| --- | --- | --- |
+| `@RequestBody @Valid OrderCreateRequest req` | 参数解析器 | `MethodArgumentNotValidException`，默认 400 |
+| `@RequestParam @Min(1) int page`（约束直接写在参数上） | Spring 6.1 起由 MVC 内置的方法校验完成 | `HandlerMethodValidationException`，默认 400 |
+| Service 类上加 `@Validated`，方法参数上写约束 | `MethodValidationPostProcessor` 生成的 AOP 代理 | `ConstraintViolationException`，不处理的话是 500 |
+
+- 第二行有个版本细节（已核对 spring-web 7.0.6 `HandlerMethod` 源码）：**Controller 类上如果标了 `@Validated`，内置的方法校验就不启用**，仍然走 AOP 那条路，抛的是 `ConstraintViolationException`。升级到 Spring 6.1 以后，Controller 类上的 `@Validated` 可以去掉。
+
+**深入剖析**
+
+```mermaid
+flowchart TD
+    A["请求进入 HandlerAdapter"] --> B["参数解析器把请求转成方法参数"]
+    B --> C{"参数上有 @Valid<br/>或 @Validated？"}
+    C -->|"有"| D["校验这个对象<br/>失败抛 MethodArgumentNotValidException"]
+    C -->|"没有"| E{"参数上直接写了约束<br/>且类上没有 @Validated？"}
+    D --> E
+    E -->|"是"| F["内置方法校验<br/>失败抛 HandlerMethodValidationException"]
+    E -->|"否"| G["调用 Controller 方法"]
+    F --> G
+```
+
+分组和嵌套的写法（示意代码，未编译）：
+
+```java
+public record OrderCreateRequest(
+        @NotNull(groups = Update.class) Long id,          // 只在更新时必填
+        @NotBlank @Size(max = MAX_REMARK_LENGTH) String remark,
+        @NotEmpty List<@Valid OrderItem> items,           // 集合元素要校验，@Valid 写在元素类型上
+        @NotNull @Valid Address address) {                // 嵌套对象要校验，字段上必须加 @Valid
+
+    public interface Update extends Default { }          // 继承 Default，更新时默认分组的约束也生效
+}
+
+@PostMapping
+public OrderResponse create(@RequestBody @Valid OrderCreateRequest request) { ... }
+
+@PutMapping
+public OrderResponse update(@RequestBody @Validated(OrderCreateRequest.Update.class) OrderCreateRequest request) { ... }
+```
+
+**校验不生效的常见原因**：
+
+1. 没有引入 `spring-boot-starter-validation`，注解存在但没有校验器，不报错也不校验；
+2. 参数上漏了 `@Valid` / `@Validated`；
+3. **嵌套对象的字段上没加 `@Valid`**，只校验了外层；
+4. 指定了分组，但约束属于默认分组（分组接口没有继承 `Default`）；
+5. Service 上的方法级校验**被同类内部调用**，没有经过代理，和 `@Transactional` 失效是同一个原因，见 05-12；
+6. 用错了约束：`@NotNull` 不拦截空字符串，`@NotEmpty` 不拦截纯空格，字符串必填要用 `@NotBlank`；`@Min`、`@Size` 等约束遇到 null 一律通过，必填要另外加 `@NotNull`。
+
+**追问链**
+
+1. **`@RequestBody @Valid List<OrderItem> items` 能校验每个元素吗？**
+   Spring 6.1 之前不能，因为 `List` 本身没有约束注解，`@Valid` 也不会展开容器。6.1 起内置的方法校验会处理"带 `@Valid` 的集合、数组、Map 参数"（已核对源码中的 `isIndexOrKeyBasedContainer` 判断），失败时抛 `HandlerMethodValidationException`。老版本的通常做法是包一层请求对象，或者在类上加 `@Validated`。
+2. **怎么写自定义约束？**
+   定义一个标了 `@Constraint(validatedBy = XxxValidator.class)` 的注解，实现 `ConstraintValidator<注解, 字段类型>`。校验器是由 Spring 创建的，可以注入其他 Bean。但**不要在校验器里查数据库**：格式校验和业务校验是两回事。
+3. **校验应该放在哪一层？**
+   - Controller 层：格式、必填、长度、范围，只依赖请求本身就能判断的规则；
+   - 领域层：业务不变量，比如"订单金额等于明细之和""已发货的订单不能改地址"，写在实体自己的方法里，见[《27 DDD》](../06-三高与架构/27-DDD.md)27-07；
+   - 中间各层不重复判空。整条链路在入口做一次校验，下游信任契约。
+4. **一个字段不合法就立刻返回，还是把所有错误都返回？**
+   默认会校验完所有约束。面向表单的接口适合全部返回，方便前端一次提示；面向内部调用的接口可以开启快速失败（Hibernate Validator 的 `fail_fast` 配置），减少无意义的校验开销。
+
+**生产实践 / 踩坑**
+
+- **三种异常只处理了一种**：全局异常处理只写了 `MethodArgumentNotValidException`，结果 `@RequestParam` 上的约束失败返回了 500。三种异常都要处理，或者继承 `ResponseEntityExceptionHandler` 后重写对应方法，再单独处理 `ConstraintViolationException`。
+- **把字段的原始值写进错误响应**：手机号、证件号校验失败时，原值不应该回显到响应和日志里，只返回字段名和错误说明。
+- **DTO 复用过度**：新增、修改、查询共用一个 DTO，靠分组区分，分组越来越多，没人说得清哪个接口校验了什么。读写分开建 DTO 通常比分组更好维护。
+
+---
+
+### 05-24 WebFlux 和 Spring MVC 有什么区别？有了虚拟线程，还需要响应式吗？
+
+> ★★★ ｜ 资深 / 架构师 ｜ 中频
+
+**考察意图**：是否理解响应式解决的是"线程被阻塞占用"的问题而不是"单次请求变快"，能否讲清它的约束，并对"要不要用"给出有依据的判断。
+
+**30 秒版回答**
+
+- Spring MVC 是**每个请求占一个线程**的模型：业务代码阻塞在 IO 上时，线程也跟着被占住。WebFlux 是**事件循环**模型：少量线程处理所有连接，IO 没就绪时线程去处理别的请求。
+- WebFlux 基于 Reactive Streams 规范（`Publisher`、`Subscriber`、`Subscription`），Spring 用的实现是 Reactor：`Mono` 表示 0 或 1 个元素，`Flux` 表示 0 到 N 个。默认运行在 Reactor Netty 上。
+- 它带来两样 MVC 没有的东西：**用很少的线程支撑大量慢连接**，以及**背压**（消费者告诉生产者"我还能处理几个"）。
+- 它**不会让单个请求变快**，还要求**整条链路都不能阻塞**：数据库要用 R2DBC，HTTP 调用要用 `WebClient`，`ThreadLocal` 不再可靠。
+- 虚拟线程出现后，"阻塞时不占用操作系统线程"这个收益用同步写法就能拿到。新项目默认用 Spring MVC 加虚拟线程；需要背压的流式场景、网关、已经运行良好的响应式系统，继续用 WebFlux。
+
+**深入剖析**
+
+```mermaid
+flowchart TD
+    subgraph MVC["Spring MVC：每个请求一个线程"]
+        direction TB
+        M1["请求 1 → 线程 1"] --> M2["调用数据库<br/>线程 1 阻塞等待"]
+        M2 --> M3["拿到结果，线程 1 写响应"]
+    end
+    subgraph FLUX["WebFlux：事件循环"]
+        direction TB
+        F1["请求 1 → 事件循环线程"] --> F2["发出数据库请求后立即返回<br/>线程去处理请求 2、3"]
+        F2 --> F3["数据库响应就绪<br/>事件循环线程继续处理请求 1"]
+    end
+    M3 ~~~ F1
+```
+
+**Reactor 的三个基本事实**：
+
+1. **不订阅就什么都不发生**。`Mono` 和 `Flux` 只是对"将来怎么计算"的描述，WebFlux 框架在写响应时替你订阅。自己在代码里创建了一个 `Mono` 却没有把它接进返回的链路，它就不会执行，也不会报错。
+2. **背压靠 `request(n)` 实现**。订阅者通过 `Subscription.request(n)` 声明还能接收多少个元素，生产者不能超发。上游是无法暂停的数据源（如行情推送）时，要显式选择策略：缓冲、丢弃、只保留最新。
+3. **线程由调度器决定**。Reactor 内置的调度器默认值（已核对 reactor-core 3.8.4 源码）：
+
+| 调度器 | 默认线程数 | 用途 |
+| --- | --- | --- |
+| `Schedulers.parallel()` | CPU 核数 | 不阻塞的计算 |
+| `Schedulers.boundedElastic()` | CPU 核数 × 10，每个线程的任务队列上限 100000 | 包装不得不执行的阻塞调用 |
+
+**在事件循环线程里阻塞会怎样**：
+
+- 调用 `block()`：Reactor 能检测到，直接抛 `IllegalStateException: block()/blockFirst()/blockLast() are blocking, which is not supported in thread ...`（已核对源码中的这段文案）；
+- 调用 JDBC、`RestTemplate`、`Thread.sleep` 这类普通阻塞方法：**不会报错**，但这个事件循环线程上的所有连接都要等它。事件循环线程数与 CPU 核数在同一量级，几个慢查询就能让整个服务失去响应。
+
+不得不调用阻塞代码时，把它切到专门的调度器上（示意代码，未编译）：
+
+```java
+public Mono<Report> loadReport(String reportId) {
+    return Mono.fromCallable(() -> legacyReportDao.query(reportId)) // 阻塞的旧代码
+            .subscribeOn(Schedulers.boundedElastic())                // 放到弹性线程池执行，不占事件循环
+            .timeout(REPORT_QUERY_TIMEOUT);
+}
+```
+
+**追问链**
+
+1. **`publishOn` 和 `subscribeOn` 有什么区别？**
+   `subscribeOn` 决定**数据源从哪个线程开始发**，写在链路的哪个位置都一样，影响的是源头；`publishOn` 决定**它之后的操作符在哪个线程执行**，位置有意义。包装阻塞调用用 `subscribeOn`，把后续的处理切走用 `publishOn`。
+2. **`ThreadLocal` 在 WebFlux 里为什么不可靠？traceId 怎么传？**
+   一个请求的处理会在多个线程之间切换，线程和请求不再一一对应。Reactor 提供了随订阅传递的 `Context` 来代替。日志 MDC 和链路追踪依赖 Micrometer 的上下文传播库，通过 `Hooks.enableAutomaticContextPropagation()` 在线程切换时自动把 `Context` 里的值恢复到 `ThreadLocal`。链路追踪的原理见[《32 日志与可观测性》](../07-工程实践与稳定性/32-日志与可观测性.md)32-04。
+3. **WebFlux 和虚拟线程能一起用吗？**
+   能，两个方向都有支持：
+   - WebFlux 6.1 起提供 `BlockingExecutionConfigurer`（已核对源码的 `@since 6.1`），可以让返回值不是响应式类型的 Controller 方法在指定的执行器上运行，这个执行器可以是虚拟线程；
+   - Reactor 的 `boundedElastic` 可以通过系统属性 `reactor.schedulers.defaultBoundedElasticOnVirtualThreads=true` 改为使用虚拟线程，默认关闭（已核对 reactor-core 3.8.4）。
+4. **什么场景下 WebFlux 仍然是更好的选择？**
+   - **网关**：纯转发、连接数多、几乎没有业务阻塞，见[《12 Spring Cloud》](../03-分布式与微服务/12-SpringCloud.md)12-07；
+   - **流式响应**：SSE、大模型逐字输出、文件流转发，数据是一段一段来的，需要背压；
+   - **扇出很大的聚合**：一个请求要并发调用几十个下游并做超时、重试、合并，Reactor 的操作符比手写线程编排简洁；
+   - 团队已经有成熟的响应式代码和排查经验。
+
+**生产实践 / 踩坑**
+
+- **响应式项目里混入阻塞调用**是头号问题：引入了一个只有同步客户端的 SDK，或者在过滤器里同步查了一次 Redis，压测时吞吐骤降。上线前用 BlockHound 这类工具在测试环境检测事件循环线程上的阻塞调用。
+- **堆栈不可读**：异常堆栈里全是 Reactor 的内部类，看不出业务调用路径。开发环境可以打开 `Hooks.onOperatorDebug()`，生产环境用开销小得多的 `checkpoint()` 给关键链路做标记。
+- **只把 Controller 改成返回 `Mono`，下面仍然是 JDBC**：线程模型变复杂了，阻塞一点没少，是最差的组合。要么整条链路响应式，要么保持同步写法并启用虚拟线程。
+
+**架构师加分点**
+
+选型时把问题还原成"瓶颈是不是线程"。如果服务的瓶颈在数据库或下游的处理能力，换成 WebFlux 不会提高吞吐，只会把排队的位置从线程池挪到连接池。只有当"大量线程阻塞在慢 IO 上、而下游还有余量"时，换线程模型才有收益；这种情况下，虚拟线程能以小得多的改造成本拿到同样的收益。响应式真正不可替代的是背压和流式组合能力，而不是省线程。迁移到虚拟线程的注意事项见[《03 Java 并发》](../01-Java核心/03-Java并发.md)03-23。
 
 ---
 

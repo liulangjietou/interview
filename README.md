@@ -62,17 +62,17 @@
 
 | 编号 | 分类 | 重点范围 | 状态 |
 | --- | --- | --- | --- |
-| 01 | [Java 基础](01-Java核心/01-Java基础.md) | 语言特性、泛型、反射、序列化、新版本特性（record / sealed / 模式匹配） | ✅ |
+| 01 | [Java 基础](01-Java核心/01-Java基础.md) | 语言特性、初始化顺序、内部类、泛型、反射、序列化、新版本特性（record / sealed / 模式匹配） | ✅ |
 | 02 | [集合类](01-Java核心/02-集合类.md) | HashMap、List、Set、Queue 的实现与选型 | ✅ |
-| 03 | [Java 并发](01-Java核心/03-Java并发.md) | JMM、锁、AQS、线程池、并发容器、虚拟线程、结构化并发 | ✅ |
+| 03 | [Java 并发](01-Java核心/03-Java并发.md) | JMM、锁、AQS、线程协作（wait / notify、park）、线程池、并发容器、FutureTask、虚拟线程、结构化并发 | ✅ |
 | 04 | [JVM](01-Java核心/04-JVM.md) | 内存结构、类加载、GC（G1 / ZGC）、调优 | ✅ |
 
 ### 模块二：框架与容器
 
 | 编号 | 分类 | 重点范围 | 状态 |
 | --- | --- | --- | --- |
-| 05 | [Spring](02-框架与容器/05-Spring.md) | IoC、AOP、事务、Spring Boot 自动配置、Boot 3/4 变化 | ✅ |
-| 06 | [MyBatis](02-框架与容器/06-MyBatis.md) | 执行流程、缓存、插件、动态 SQL | ✅ |
+| 05 | [Spring](02-框架与容器/05-Spring.md) | IoC、AOP、事务、Web（MVC、全局异常、参数校验、WebFlux）、Spring Boot 自动配置、Boot 3/4 变化 | ✅ |
+| 06 | [MyBatis](02-框架与容器/06-MyBatis.md) | 执行流程、缓存、插件、动态 SQL、连接池（HikariCP） | ✅ |
 | 07 | [Tomcat](02-框架与容器/07-Tomcat.md) | 架构、请求处理、线程模型、调优 | ✅ |
 | 08 | [Netty](02-框架与容器/08-Netty.md) | Reactor、ByteBuf、零拷贝、粘包拆包 | ✅ |
 

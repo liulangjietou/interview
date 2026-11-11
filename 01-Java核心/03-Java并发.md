@@ -10,10 +10,10 @@
 ```mermaid
 flowchart LR
     ROOT["Java 并发"] --> JMM["内存模型<br/>可见性 · 有序性 · happens-before"]
-    ROOT --> LOCK["锁<br/>synchronized · CAS · AQS · 读写锁"]
+    ROOT --> LOCK["锁与线程协作<br/>synchronized · CAS · AQS · 读写锁<br/>wait/notify · park/unpark"]
     ROOT --> POOL["线程池<br/>执行流程 · 参数 · 异常 · 事故"]
     ROOT --> TOOLS["并发容器与工具<br/>ConcurrentHashMap · 同步器 · 阻塞队列 · ThreadLocal"]
-    ROOT --> ASYNC["异步编排<br/>CompletableFuture · ForkJoinPool"]
+    ROOT --> ASYNC["异步编排<br/>FutureTask · CompletableFuture · ForkJoinPool"]
     ROOT --> MODERN["现代并发 JDK 21+<br/>虚拟线程 · 结构化并发 · ScopedValue"]
     JMM -->|"是锁和容器正确性的基础"| LOCK
     LOCK -->|"AQS 支撑同步器与阻塞队列"| TOOLS
@@ -29,6 +29,7 @@ flowchart LR
 | 03-02 | happens-before 是什么？如何用它判断代码是否线程安全？ | ★★★ | 架构师 |
 | 03-03 | volatile 的底层原理？为什么 DCL 单例必须加 volatile？ | ★★ | 资深 |
 | 03-04 | 线程有哪些状态？BLOCKED 和 WAITING 的区别？如何正确停止线程？ | ★ | 资深 |
+| 03-25 | wait / notify 的原理是什么？为什么必须写在 synchronized 里、必须用 while 判断？ | ★★ | 资深 |
 | 03-05 | synchronized 的底层实现与锁状态演进（JDK 25 视角） | ★★★ | 资深 / 架构师 |
 | 03-06 | CAS 的原理与问题；AtomicLong 和 LongAdder 怎么选？ | ★★ | 资深 |
 | 03-07 | AQS 的核心设计，以 ReentrantLock 讲一遍加锁解锁 | ★★★ | 资深 |
@@ -36,6 +37,7 @@ flowchart LR
 | 03-09 | ReentrantLock 和 synchronized 怎么选？ | ★★ | 资深 |
 | 03-10 | ReentrantReadWriteLock 和 StampedLock 的区别与选型 | ★★ | 资深 |
 | 03-11 | 死锁如何产生？线上如何排查与预防？ | ★★ | 资深 |
+| 03-26 | LockSupport 的 park / unpark 是怎么工作的？和 wait / notify 有什么区别？ | ★★ | 资深 |
 | 03-12 | ThreadPoolExecutor 的执行流程与状态 | ★★ | 资深 |
 | 03-13 | 线程池参数怎么定？如何动态调整与可观测？ | ★★★ | 架构师 |
 | 03-14 | 线程池中任务的异常为什么"消失"了？如何优雅关闭？ | ★★ | 资深 |
@@ -46,6 +48,7 @@ flowchart LR
 | 03-19 | ThreadLocal 原理、内存泄漏与线程池上下文传递 | ★★★ | 资深 |
 | 03-20 | CompletableFuture 怎么用？生产中有哪些坑？ | ★★★ | 资深 / 架构师 |
 | 03-21 | ForkJoinPool 的工作窃取；parallelStream 为什么要慎用？ | ★★ | 资深 |
+| 03-27 | FutureTask 的原理是什么？get 为什么会阻塞，cancel 真的能停掉任务吗？ | ★★ | 资深 |
 | 03-22 | 虚拟线程的原理是什么？和平台线程有什么区别？ | ★★★ | 资深 / 架构师 |
 | 03-23 | 把服务迁移到虚拟线程，需要注意什么？ | ★★★ | 架构师 |
 | 03-24 | 结构化并发和 ScopedValue 解决了什么问题？ | ★★★ | 架构师 |
@@ -376,6 +379,102 @@ public final class PollingWorker implements Runnable {
    - 虚拟线程上，阻塞在 `Socket` / `ServerSocket` / `DatagramSocket` 操作中时，中断会唤醒线程并关闭 socket（JEP 444 的规定）。
 3. **sleep 和 wait 的区别？**
    `wait()` 必须在 synchronized 内调用，会释放 monitor；`sleep()` 不释放任何锁。`wait()` 可能被虚假唤醒，必须放在 while 循环里判断条件。
+
+---
+
+### 03-25 wait / notify 的原理是什么？为什么必须写在 synchronized 里、必须用 while 判断？
+
+> ★★ ｜ 资深 ｜ 高频
+
+**考察意图**：现在业务代码很少直接写 wait / notify，但它是理解 Condition、阻塞队列和"丢失唤醒"的基础。面试官想确认你讲得出三条规则背后的原因，而不是只背规则。
+
+**30 秒版回答**
+
+- 每个对象的 monitor 除了"谁持有锁"之外，还维护两个集合：**入口队列**（抢不到锁的线程，状态 BLOCKED）和**等待集合**（调用了 `wait()` 的线程，状态 WAITING）。
+- `wait()` 做三件事：把当前线程放进等待集合、**释放 monitor**、挂起。被唤醒后要**重新抢到 monitor** 才能从 `wait()` 返回。
+- `notify()` 只是把等待集合里的一个线程挪到入口队列。调用 `notify()` 的线程不会立刻让出锁，要等它退出 synchronized，被唤醒的线程才有机会运行。
+- **必须在 synchronized 里**：判断条件和调用 `wait()` 必须是原子的，否则会丢失唤醒。JVM 用抛 `IllegalMonitorStateException` 的方式强制这一点。
+- **必须用 while**：线程从 `wait()` 返回时，条件不一定成立。原因有三个：被 `notifyAll()` 一起唤醒的其他线程先把条件消费掉了；`notify()` 唤醒的是等另一个条件的线程；操作系统层面允许虚假唤醒。
+- **优先用 notifyAll**：一个 monitor 只有一个等待集合，生产者和消费者混在一起，`notify()` 可能叫醒同类，造成所有线程都在等。需要精确唤醒时用 `Condition`，见 03-08。
+
+**深入剖析**
+
+```mermaid
+flowchart TD
+    A["入口队列<br/>抢不到 monitor 的线程，BLOCKED"] -->|"抢到 monitor"| B["持有者<br/>正在 synchronized 里执行"]
+    B -->|"wait()：释放 monitor 并挂起"| C["等待集合<br/>WAITING / TIMED_WAITING"]
+    C -->|"notify / notifyAll / 中断 / 超时"| A
+    B -->|"退出 synchronized"| D["释放 monitor<br/>入口队列里的线程开始竞争"]
+```
+
+**不加锁为什么会丢失唤醒**。假设允许这样写：
+
+```java
+// 错误示意：判断和等待之间没有锁保护
+if (queue.isEmpty()) {
+    // ← 此时生产者放入元素并调用 notify()，但还没有线程在等，这次通知白发了
+    lock.wait(); // 消费者开始等待，再也没有人来唤醒它
+}
+```
+
+消费者"看到队列为空"和"开始等待"之间有一个窗口，生产者的通知如果落在这个窗口里就丢了。把判断、等待、修改条件、通知全部放进同一把锁里，这个窗口才会消失。
+
+用 wait / notifyAll 写的有界缓冲区，本机 JDK 25 运行过：3 个生产者各放入 1000 个数、2 个消费者取出，结果 `消费条数=3000，期望=3000；数值之和=1501500，期望=1501500`。
+
+```java
+/** 用 wait / notifyAll 实现的有界缓冲区 */
+static final class BoundedBuffer<T> {
+    private final Queue<T> queue = new ArrayDeque<>();
+    private final int capacity;
+
+    BoundedBuffer(int capacity) { this.capacity = capacity; }
+
+    synchronized void put(T item) throws InterruptedException {
+        while (queue.size() == capacity) {   // 必须是 while：被唤醒后条件可能又不成立
+            wait();                          // 释放 monitor，进入等待集合
+        }
+        queue.add(item);
+        notifyAll();                         // 生产者和消费者等在同一个集合里，只能全部唤醒
+    }
+
+    synchronized T take() throws InterruptedException {
+        while (queue.isEmpty()) {
+            wait();
+        }
+        T item = queue.remove();
+        notifyAll();
+        return item;
+    }
+}
+```
+
+`sleep`、`wait`、`park` 三者经常放在一起问：
+
+| 维度 | `Thread.sleep` | `Object.wait` | `LockSupport.park` |
+| --- | --- | --- | --- |
+| 是否需要持有锁 | 不需要 | 必须持有该对象的 monitor | 不需要 |
+| 是否释放锁 | 不释放任何锁 | 释放这个对象的 monitor | 不释放任何锁 |
+| 怎么唤醒 | 超时、中断 | notify、notifyAll、超时、中断 | unpark、超时、中断 |
+| 能否指定唤醒谁 | 不涉及 | 不能，由 JVM 选 | 能，`unpark(thread)` |
+| 对中断的反应 | 抛 `InterruptedException` | 抛 `InterruptedException` | 直接返回，不抛异常 |
+| 先唤醒后等待 | 不涉及 | 通知丢失 | 不丢，许可会留着，见 03-26 |
+
+**追问链**
+
+1. **`notify()` 之后，被唤醒的线程马上就运行吗？**
+   不会。它只是从等待集合进了入口队列，还要等通知方退出 synchronized，再和其他线程竞争 monitor。所以 `notify()` 写在同步块的开头还是结尾，对被唤醒线程的运行时机没有区别。
+2. **只用 `notify()` 会出什么问题？**
+   缓冲区容量为 1，两个生产者、两个消费者。某一时刻两个消费者和一个生产者都在等待集合里，另一个生产者放入元素后 `notify()` 恰好唤醒了那个生产者，它发现缓冲区已满又去等待。此时没有任何线程会再发通知，四个线程全部永久等待。这种问题没有死锁的环路，jstack 也不会提示，只能看到所有线程都是 WAITING。
+3. **`wait(timeout)` 返回后，怎么知道是超时还是被唤醒？**
+   区分不了，返回值是 void。要自己记录截止时间，在 while 循环里重新计算剩余等待时间。`Condition.awaitNanos` 会返回剩余时间，这是它比 `wait` 好用的地方之一。
+4. **虚拟线程里用 synchronized 加 wait 有问题吗？**
+   JDK 21 到 23，虚拟线程在 synchronized 块里阻塞（包括 `wait()`）会把载体线程一起占住。JDK 24 的 JEP 491 解决了这个问题，阻塞时虚拟线程可以正常卸载。迁移注意事项见 03-23。
+
+**生产实践 / 踩坑**
+
+- 新代码不要再手写 wait / notify。生产者消费者用 `BlockingQueue`，等一组任务完成用 `CountDownLatch` 或 `CompletableFuture`，自定义条件等待用 `ReentrantLock` 加 `Condition`。手写版本最常见的错误就是上面三条规则漏了一条。
+- **不要在公开的对象上 wait**，比如 `this` 或者一个对外暴露的字段。外部代码可以对同一个对象调用 `notifyAll()` 或者长时间持有它的锁，干扰你的等待逻辑。用一个私有的 `final Object lock`。
+- 排查时看到大量线程 `WAITING (on object monitor)`，先在 jstack 里找它们等的是哪个对象，再找谁应该调用 `notify`。常见原因是通知方因为异常提前退出，没有走到通知那一行。通知要放在 finally 能覆盖的位置。
 
 ---
 
@@ -843,6 +942,102 @@ public void transfer(Account from, Account to, long amount) {
    - 连接池死锁：一个请求内嵌套获取两个数据库连接，并发量一大，所有线程都持有一个、等待第二个。
    - 分布式锁之间互相等待。
    这些情况 jstack 不会报 deadlock，只能从"线程全部在等待某种资源"的特征去判断。
+
+---
+
+### 03-26 LockSupport 的 park / unpark 是怎么工作的？和 wait / notify 有什么区别？
+
+> ★★ ｜ 资深 ｜ 中频
+
+**考察意图**：AQS、线程池、`FutureTask`、`CompletableFuture` 的阻塞最终都落在 `LockSupport.park` 上。讲清它的"许可"模型，才算真正理解这些工具为什么不会丢失唤醒。
+
+**30 秒版回答**
+
+- 每个线程关联一个**许可**，只有"有"和"没有"两种状态，**不会累加**（已核对 JDK 25 的 `LockSupport` 文档注释：at most one）。
+- `park()`：有许可就消耗掉并立即返回；没有就挂起当前线程。
+- `unpark(thread)`：把目标线程的许可置为"有"；如果它正挂起就唤醒它。
+- 和 wait / notify 的三个关键区别：
+  1. **不需要持有任何锁**；
+  2. **可以指定唤醒哪个线程**，AQS 的 FIFO 队列正是靠这一点按顺序唤醒后继节点；
+  3. **先 unpark 再 park 不会丢失唤醒**，许可会一直留到下一次 park。
+- `park()` 在三种情况下返回：被 `unpark`、被中断、**无原因的虚假返回**。它不抛 `InterruptedException`，也不告诉你是哪种原因，所以调用方必须在循环里重新检查条件。
+
+**深入剖析**
+
+下面的代码在本机 JDK 25 上运行过：
+
+```java
+// 1. 先 unpark 再 park：许可已经存在，park 立即返回
+LockSupport.unpark(Thread.currentThread());
+long t0 = System.nanoTime();
+LockSupport.park();
+System.out.println("先 unpark 再 park，耗时(ms)=" + (System.nanoTime() - t0) / 1_000_000);
+
+// 2. 许可不累加：连续 unpark 两次，只够一次 park 用
+LockSupport.unpark(Thread.currentThread());
+LockSupport.unpark(Thread.currentThread());
+LockSupport.park();
+t0 = System.nanoTime();
+LockSupport.parkNanos(200_000_000L);
+System.out.println("unpark 两次后第二次 park，耗时(ms)=" + (System.nanoTime() - t0) / 1_000_000);
+
+// 3. 中断会让 park 返回，不抛异常，也不清除中断标志
+Thread t = new Thread(() -> {
+    LockSupport.park(ParkDemo.class);
+    System.out.println("park 被中断唤醒，中断标志=" + Thread.currentThread().isInterrupted());
+    long s = System.nanoTime();
+    LockSupport.park();
+    System.out.println("中断标志未清除时再次 park，耗时(ms)=" + (System.nanoTime() - s) / 1_000_000);
+}, "park-demo");
+t.start();
+Thread.sleep(100);
+System.out.println("阻塞中的线程状态=" + t.getState() + "，blocker=" + LockSupport.getBlocker(t));
+t.interrupt();
+t.join();
+```
+
+```text
+先 unpark 再 park，耗时(ms)=0
+unpark 两次后第二次 park，耗时(ms)=205
+阻塞中的线程状态=WAITING，blocker=class ParkDemo
+park 被中断唤醒，中断标志=true
+中断标志未清除时再次 park，耗时(ms)=0
+```
+
+最后一行值得注意：**中断标志没清除时，再次 park 会立即返回**。如果循环里只是反复 park 而不处理中断，线程会变成空转，CPU 占满一个核。
+
+标准用法是"条件放在循环里，park 只负责等"：
+
+```java
+// 等待方
+while (!condition()) {          // 条件由 volatile 变量或 CAS 维护
+    LockSupport.park(this);      // 传入 blocker，方便 jstack 里看出在等什么
+    if (Thread.interrupted()) {  // 读取并清除中断标志，按业务决定退出还是继续等
+        throw new InterruptedException();
+    }
+}
+
+// 通知方：先改条件，再 unpark
+changeCondition();
+LockSupport.unpark(waiterThread);
+```
+
+这段代码不会丢失唤醒：如果通知方的 `unpark` 发生在等待方"检查条件之后、park 之前"，许可会留下来，等待方的 `park` 立即返回，回到循环开头重新检查条件。
+
+**追问链**
+
+1. **park 在 JVM 里是怎么实现的？**
+   - 平台线程：HotSpot 给每个线程配了一个 Parker 对象，里面是一个计数器加一组操作系统的互斥量和条件变量。`park` 检查计数器，为 0 就在条件变量上等待；`unpark` 把计数器置 1 并发信号。
+   - 虚拟线程：`LockSupport.park` 里先判断 `isVirtual()`（已核对 JDK 25 源码），虚拟线程走的是另一条路径：把自己的栈从载体线程上卸下来，载体线程去执行别的虚拟线程，**不会阻塞操作系统线程**。原理见 03-22。
+2. **AQS 为什么用 park / unpark，而不用 wait / notify？**
+   AQS 自己维护等待队列，释放锁时要唤醒**队头的那一个**线程，wait / notify 做不到指定唤醒。另外 AQS 要支持可中断、带超时、不可中断三种获取方式，park 不抛异常、由调用方自己决定怎么处理中断，正好合适。
+3. **`park(Object blocker)` 的参数有什么用？**
+   只用于诊断。JVM 把它记在线程对象里，jstack 中显示为 `parking to wait for <0x...> (a java.util.concurrent.locks.ReentrantLock$NonfairSync)`，据此能看出线程在等哪把锁、哪个队列。自己封装同步工具时应该传 blocker。
+
+**生产实践 / 踩坑**
+
+- jstack 里 `WAITING (parking)` 本身不代表有问题。线程池的空闲线程停在 `LinkedBlockingQueue` 的 `ConditionObject` 上是正常状态。要看的是 blocker：大量业务线程停在同一把 `ReentrantLock` 上，才说明有锁竞争或者持锁的线程卡住了。
+- 自己用 park 写等待逻辑时，漏掉循环或者漏掉中断处理是最常见的两类错误。前者在虚假返回时逻辑出错，后者在中断后空转。能用现成的同步器就不要直接用 `LockSupport`。
 
 ---
 
@@ -1545,6 +1740,131 @@ try {
    不是。虚拟线程的调度器是一个**单独的** ForkJoinPool，并且以 FIFO 模式（asyncMode = true）运行（已核对 JDK 25 `VirtualThread.createDefaultScheduler`）。
 4. **JDK 25 的 ForkJoinPool 有什么新变化？**
    JDK 25 中 ForkJoinPool 实现了 `ScheduledExecutorService` 接口，可以直接提交延迟任务和周期任务（已核对：JDK 24 源码中还没有，JDK 25 中已经有）。
+
+---
+
+### 03-27 FutureTask 的原理是什么？get 为什么会阻塞，cancel 真的能停掉任务吗？
+
+> ★★ ｜ 资深 ｜ 中频
+
+**考察意图**：`submit()` 返回的 Future 背后就是 FutureTask。讲清它的状态机，才能解释"异常为什么被吞""取消为什么没生效""同一个任务为什么只执行一次"。
+
+**30 秒版回答**
+
+- FutureTask 同时实现了 `Runnable` 和 `Future`：线程池把它当任务执行，调用方把它当凭证取结果。`submit()` 内部就是把 Callable 包成 FutureTask 再 `execute`。
+- 核心是四个字段（已核对 JDK 25 源码）：
+  - `state`：volatile 的状态，共 7 个值；
+  - `outcome`：正常结果或者异常；
+  - `runner`：正在执行任务的线程，用 CAS 从 null 改成当前线程，**保证任务只被执行一次**；
+  - `waiters`：调用 `get()` 而阻塞的线程，组成一个无锁的栈。
+- `run()`：执行任务 → 把结果或异常写进 `outcome` → 修改状态 → 唤醒 `waiters` 里的所有线程。
+- `get()`：任务没结束就把自己挂到 `waiters` 上并 `park`；被唤醒后按状态返回结果、抛 `ExecutionException` 或 `CancellationException`。
+- `cancel(true)` 只是给执行线程发**中断**，任务不响应中断就会继续跑完，只不过结果被丢弃。
+
+**深入剖析**
+
+状态流转（已核对 JDK 25 `FutureTask` 源码注释）：
+
+```mermaid
+stateDiagram-v2
+    [*] --> NEW
+    NEW --> COMPLETING : 任务执行结束，开始写结果
+    COMPLETING --> NORMAL : 结果已写入
+    COMPLETING --> EXCEPTIONAL : 异常已写入
+    NEW --> CANCELLED : cancel(false)
+    NEW --> INTERRUPTING : cancel(true)
+    INTERRUPTING --> INTERRUPTED : 已对执行线程发出中断
+    NORMAL --> [*]
+    EXCEPTIONAL --> [*]
+    CANCELLED --> [*]
+    INTERRUPTED --> [*]
+```
+
+两点说明：
+
+- NEW 既表示"还没开始"，也表示"正在执行"，FutureTask 内部不区分这两者。
+- JDK 19 新增的 `Future.state()` 把这 7 个内部状态归并成 4 个对外状态：RUNNING、SUCCESS、FAILED、CANCELLED，同时新增了不阻塞的 `resultNow()` 和 `exceptionNow()`。
+
+下面的代码在本机 JDK 25 上运行过：
+
+```java
+// 1. 同一个 FutureTask 被多个线程 run，只会真正执行一次
+AtomicInteger executed = new AtomicInteger();
+FutureTask<String> task = new FutureTask<>(() -> {
+    executed.incrementAndGet();
+    Thread.sleep(50);
+    return "result";
+});
+System.out.println("执行前 state=" + task.state());
+Thread[] ts = new Thread[4];
+for (int i = 0; i < ts.length; i++) { ts[i] = new Thread(task); ts[i].start(); }
+for (Thread t : ts) { t.join(); }
+System.out.println("4 个线程 run 同一个任务，实际执行次数=" + executed.get()
+        + "，get=" + task.get() + "，state=" + task.state());
+
+// 2. 任务抛异常：异常被存进 outcome，get 时才以 ExecutionException 抛出
+FutureTask<String> failed = new FutureTask<>(() -> { throw new IllegalStateException("boom"); });
+failed.run();
+System.out.println("异常任务 run 之后没有任何输出，state=" + failed.state());
+try {
+    failed.get();
+} catch (ExecutionException e) {
+    System.out.println("get 抛出 " + e.getClass().getSimpleName() + "，cause=" + e.getCause());
+}
+
+// 3. cancel(true) 会中断正在执行的线程；取消之后 get 抛 CancellationException
+CountDownLatch started = new CountDownLatch(1);
+FutureTask<String> slow = new FutureTask<>(() -> {
+    started.countDown();
+    try {
+        Thread.sleep(10_000);
+    } catch (InterruptedException e) {
+        System.out.println("任务线程收到中断");
+        throw e;
+    }
+    return "never";
+});
+Thread runner = new Thread(slow);
+runner.start();
+started.await();
+System.out.println("cancel(true) 返回 " + slow.cancel(true) + "，state=" + slow.state());
+runner.join();
+try {
+    slow.get();
+} catch (CancellationException e) {
+    System.out.println("取消后 get 抛出 " + e.getClass().getSimpleName());
+}
+System.out.println("已完成的任务再 cancel 返回 " + task.cancel(true));
+```
+
+```text
+执行前 state=RUNNING
+4 个线程 run 同一个任务，实际执行次数=1，get=result，state=SUCCESS
+异常任务 run 之后没有任何输出，state=FAILED
+get 抛出 ExecutionException，cause=java.lang.IllegalStateException: boom
+任务线程收到中断
+cancel(true) 返回 true，state=CANCELLED
+取消后 get 抛出 CancellationException
+已完成的任务再 cancel 返回 false
+```
+
+第三行就是"`submit()` 提交的任务异常消失"的原因：`run()` 把异常接住存了起来，线程池看到的是一次正常结束的执行，不调用 `get()` 就没有任何地方会打印它。处理办法见 03-14。
+
+**追问链**
+
+1. **为什么需要 COMPLETING 这个中间状态？**
+   "写入 outcome"和"把状态改成终态"是两步。先用 CAS 把状态从 NEW 改成 COMPLETING，等于抢到了写结果的权利，同时挡住并发的 `cancel`；写完 outcome 再改成 NORMAL 或 EXCEPTIONAL。`get()` 看到 COMPLETING 时知道结果马上就好，只做短暂让步，不会挂起。
+2. **`cancel(true)` 之后，任务一定停了吗？**
+   不一定。它只做三件事：改状态、对执行线程调用 `interrupt()`、唤醒等待结果的线程。任务代码如果既不调用可中断的阻塞方法，也不检查中断标志，就会一直跑到结束，白白占着线程。写长任务时要在循环里检查 `Thread.currentThread().isInterrupted()`。
+3. **定时线程池的周期任务抛了异常，为什么后面就不执行了？**
+   周期任务用的是 `runAndReset()`：正常结束后不写结果，把状态留在 NEW，以便下次再跑。任务抛异常时状态变成 EXCEPTIONAL，`runAndReset()` 返回 false，调度器就不再把它放回队列。所以周期任务的方法体必须自己 try-catch，见[《34 定时任务》](../07-工程实践与稳定性/34-定时任务.md)34-03。
+4. **Future 有什么局限？**
+   只能阻塞地取结果，不能注册回调，也不能把多个异步结果组合起来。这些能力由 `CompletableFuture` 提供，见 03-20。
+
+**生产实践 / 踩坑**
+
+- **`get()` 不带超时**：下游卡住时调用线程永久阻塞，线程池被慢慢占满。一律用 `get(timeout, unit)`，超时后调用 `cancel(true)` 释放执行线程。
+- **用 FutureTask 防止重复计算**：缓存里存 `ConcurrentHashMap<K, Future<V>>`，用 `putIfAbsent` 放入 FutureTask，只有放入成功的线程调用 `run()`，其他线程 `get()` 等同一个结果。这样同一个 Key 的昂贵计算只会发生一次，是防缓存击穿的经典写法。计算失败时要把这个 Future 从 Map 里移除，否则失败结果会被永久缓存。手写版本见[《42 编程题》](../10-编码与思维/42-编程题.md)42-06。
 
 ---
 

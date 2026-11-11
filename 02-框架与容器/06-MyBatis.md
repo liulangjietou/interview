@@ -2,7 +2,7 @@
 
 > 适用岗位：Java 资深开发 / 架构师
 > 版本基线：MyBatis 3.5.x、MyBatis-Spring 3.x、MyBatis-Plus 3.5.x
-> 事实核对：默认配置和类结构来自本机 Maven 仓库中的 MyBatis 3.5.19 与 MyBatis-Spring 3.0.5（`javap` 与实际运行），标「实测」的行为已运行验证
+> 事实核对：默认配置和类结构来自本机 Maven 仓库中的 MyBatis 3.5.19 与 MyBatis-Spring 3.0.5（`javap` 与实际运行），标「实测」的行为已运行验证；06-16 的连接池默认值和借还流程来自 HikariCP 7.0.2 源码
 > 相关分类：[《05 Spring》](05-Spring.md)（事务、FactoryBean、BeanPostProcessor）、[《15 MySQL》](../04-数据存储/15-MySQL.md)（索引与慢 SQL）、[《16 分库分表》](../04-数据存储/16-分库分表.md)
 
 ## 知识地图
@@ -14,7 +14,7 @@ flowchart LR
     ROOT --> SQL["SQL 构建<br/>#{} 与 ${} · 动态 SQL"]
     ROOT --> CACHE["缓存<br/>一级缓存 · 二级缓存"]
     ROOT --> EXT["扩展<br/>插件 · TypeHandler · 分页"]
-    ROOT --> INT["整合与生态<br/>MyBatis-Spring · MyBatis-Plus · 多数据源"]
+    ROOT --> INT["整合与生态<br/>MyBatis-Spring · MyBatis-Plus<br/>多数据源 · 连接池"]
     CORE --> EXT
 ```
 
@@ -37,6 +37,7 @@ flowchart LR
 | 06-13 | 多数据源与读写分离如何实现？ | ★★★ | 架构师 |
 | 06-14 | MyBatis-Plus 的原理与常见坑 | ★★ | 资深 |
 | 06-15 | MyBatis 和 JPA / Hibernate 怎么选？ | ★★ | 架构师 |
+| 06-16 | 数据库连接池是怎么工作的？HikariCP 为什么快，关键参数怎么配？ | ★★★ | 资深 |
 
 ---
 
@@ -665,3 +666,87 @@ flowchart LR
 **架构师加分点**
 
 无论用哪个框架，都应该在仓储（Repository）这一层把持久化细节封装起来，领域层只依赖仓储接口。这样技术选型是可以替换的局部决策，而不是渗透到全部业务代码中的全局约束。见[《27 DDD》](../06-三高与架构/27-DDD.md)。
+
+---
+
+### 06-16 数据库连接池是怎么工作的？HikariCP 为什么快，关键参数怎么配？
+
+> ★★★ ｜ 资深 ｜ 高频
+
+**考察意图**：MyBatis 的每条 SQL 都要先向连接池借连接。面试官想知道你是否了解借还连接的过程、连接什么时候被淘汰，以及能否解释"连接明明没满却报连接已关闭"这类问题。
+
+**30 秒版回答**
+
+- 为什么需要连接池：建立一个数据库连接要经过 TCP 握手、TLS 握手、认证、会话初始化，成本远高于执行一条简单 SQL。连接池预先建好连接并复用，同时**限制了应用对数据库的并发**。
+- HikariCP 是 Spring Boot 的默认连接池。它快的原因集中在"借连接"这一步的无锁设计：
+  1. **ConcurrentBag**：每个线程优先从自己上次用过的连接里取，取不到再用 CAS 扫描共享列表，都没有才排队等别人归还；
+  2. **编译期生成代理类**：`Connection`、`Statement` 的代理类在 HikariCP 构建时用 Javassist 生成，运行时没有反射和动态代理；
+  3. **FastList**：用一个去掉了范围检查的列表记录连接上打开的 Statement。
+- 关键参数的默认值（已核对 HikariCP 7.0.2 源码）：
+
+| 参数 | 默认值 | 含义 |
+| --- | --- | --- |
+| `maximumPoolSize` | 10 | 连接数上限，包括使用中和空闲的 |
+| `minimumIdle` | 等于 `maximumPoolSize` | 最小空闲数。默认就是固定大小的池 |
+| `connectionTimeout` | 30 秒 | 借不到连接时最多等多久 |
+| `maxLifetime` | 30 分钟 | 连接的最长存活时间，到期后在空闲时被替换 |
+| `keepaliveTime` | 2 分钟 | 每隔这么久对**空闲**连接做一次存活检测 |
+| `idleTimeout` | 10 分钟 | 空闲连接多久后被回收，只在 `minimumIdle` 小于 `maximumPoolSize` 时生效 |
+| `validationTimeout` | 5 秒 | 存活检测的超时 |
+| `leakDetectionThreshold` | 0（关闭） | 连接借出超过这个时间就打印泄漏告警和借出时的调用栈 |
+
+- 池大小怎么定见[《24 高并发》](../06-三高与架构/24-高并发.md)24-10，连接池被打满怎么排查见[《33 线上问题排查》](../07-工程实践与稳定性/33-线上问题排查.md)33-12，这里只讲原理和参数。
+
+**深入剖析**
+
+借连接的过程（已核对 `ConcurrentBag.borrow` 和 `HikariPool.getConnection` 源码）：
+
+```mermaid
+flowchart TD
+    A["getConnection()"] --> B{"本线程用过的连接里<br/>有空闲的吗？"}
+    B -->|"有，CAS 抢到"| V["存活检测"]
+    B -->|"没有"| C{"扫描共享列表<br/>CAS 抢到一个空闲连接？"}
+    C -->|"抢到"| V
+    C -->|"没抢到"| D["通知建连线程补充连接<br/>自己在交接队列上等待"]
+    D -->|"有连接归还或新建完成"| V
+    D -->|"等到 connectionTimeout"| E["抛出 SQLTransientConnectionException"]
+    V -->|"距上次使用不到 500 毫秒：跳过检测<br/>否则调用 Connection.isValid"| F{"连接可用？"}
+    F -->|"可用"| G["包装成代理连接返回"]
+    F -->|"已失效"| H["关闭这个连接，回到开头重试"]
+```
+
+几个容易讲错的点：
+
+- **连接的状态用 CAS 切换**：每个连接有"空闲、使用中、已移除、保留"四种状态，借出就是把状态从"空闲"改成"使用中"，整个过程不加锁。
+- **归还时优先直接交给等待者**：有线程在排队时，归还的连接通过交接队列（`SynchronousQueue`）直接递到等待线程手里，不经过共享列表的再次竞争。
+- **存活检测默认用 JDBC4 的 `Connection.isValid()`**。`connectionTestQuery` 只是给不支持 JDBC4 的老驱动用的，配置了反而多一次 SQL 往返。
+- **`maxLifetime` 带随机抖动**：每个连接的实际寿命是 `maxLifetime` 减去一个随机值，避免所有连接在同一时刻到期。7.0.2 的源码中这个随机值最大为 `maxLifetime` 的四分之一。**使用中的连接不会被强行关闭**，要等归还之后才淘汰。
+- **保洁线程每 30 秒运行一次**：回收超过 `idleTimeout` 的空闲连接、把空闲连接补到 `minimumIdle`。它还会检查时钟：发现时间倒退就淘汰全部连接，发现两次运行的间隔明显变长就打印 `Thread starvation or clock leap detected`。
+
+说明：`keepaliveTime` 的默认值和 `maxLifetime` 的抖动比例，网上的旧资料里有不同的说法。本文只核对了 7.0.2 的源码，使用其他版本时以对应版本的 `HikariConfig` 和 `HikariPool` 为准。
+
+**追问链**
+
+1. **为什么推荐固定大小的连接池？**
+   `minimumIdle` 默认等于 `maximumPoolSize`，就是这个意思。连接数随流量伸缩时，流量突增的那一刻恰恰要现建连接，建连的几十到几百毫秒会直接体现为请求延迟；而且数据库端为每个连接保留的内存并不会因为应用少开几个连接就省下多少。流量稳定的在线服务用固定大小，只有连接数受严格限制的场景（比如很多小服务共用一个数据库）才考虑调小 `minimumIdle`。
+2. **连接池没满，却报 `Communications link failure` 或者"连接已关闭"，是什么原因？**
+   池里的连接被**对端或者中间的网络设备**悄悄关掉了，应用还不知道。常见来源：
+   - MySQL 的 `wait_timeout` 到期，服务端主动关闭空闲连接；
+   - 负载均衡、NAT 网关、防火墙对空闲 TCP 连接有超时，通常只有几分钟到十几分钟，而且**不通知两端**；
+   - 数据库发生了主从切换或重启。
+   对策是让连接池先于它们行动：`maxLifetime` 设得比上述所有超时都短；保持 `keepaliveTime` 开启，让空闲连接定期有流量。HikariCP 校验失败时的日志里也有提示：`Possibly consider using a shorter maxLifetime value`。
+3. **`leakDetectionThreshold` 报了泄漏，一定是连接没关吗？**
+   不一定。它只表示"这个连接借出去超过阈值还没还"。可能是真的漏关，也可能是一个事务里包含了很慢的 SQL 或远程调用。日志里附带的是**借出连接时**的调用栈，顺着它能找到是哪个方法占着连接。连接后来归还时，HikariCP 会再打印一条 `Previously reported leaked connection ... was returned to the pool`，据此可以区分"慢"和"真泄漏"。
+4. **HikariCP 和 Druid 怎么选？**
+   - HikariCP 只做连接池这一件事，代码量小，Spring Boot 默认集成，监控通过 Micrometer 输出；
+   - Druid 的特点是内置功能多：SQL 执行统计、慢 SQL 日志、基于 SQL 解析的防火墙、监控页面。
+   如果已经有独立的 APM 和数据库审计，用 HikariCP 即可；需要在应用侧直接看到 SQL 级统计、又没有其他手段时，Druid 的内置监控比较省事。无论选哪个，监控页面和统计接口都不能暴露到公网。
+5. **用了虚拟线程，连接池要改吗？**
+   线程数不再是并发的上限以后，**连接池就成了实际的并发闸门**：成千上万个虚拟线程同时请求，只有 `maximumPoolSize` 个能拿到连接，其余的都在等。这本身是合理的保护，但要注意两点：`connectionTimeout` 要设短，让等不到的请求快速失败；不要因为"线程变便宜了"就把连接池调大，数据库的处理能力没有变。另外，ConcurrentBag"优先取本线程用过的连接"这层缓存，在每个任务一个新线程的模式下基本不命中，借连接会更多地走共享列表。
+
+**生产实践 / 踩坑**
+
+- **`connectionTimeout` 保持默认的 30 秒**：数据库变慢时，请求线程在"借连接"这一步各等 30 秒，Web 容器的线程很快被占满，故障从数据库扩散到整个服务。在线服务建议设为 1 到 3 秒。
+- **一个应用里所有业务共用一个连接池**：报表导出、批量任务把连接占满，下单接口借不到连接。把慢查询和批处理拆到独立的数据源，池大小各自限制。
+- **长事务**：`@Transactional` 方法在开启事务时就借走了连接，方法里的远程调用、文件处理期间连接一直被占着。事务里只放数据库操作，见[《05 Spring》](05-Spring.md)05-13。
+- **应用扩容前先算总连接数**：实例数 × `maximumPoolSize` 不能超过数据库的 `max_connections`，还要给运维和其他应用留余量。
