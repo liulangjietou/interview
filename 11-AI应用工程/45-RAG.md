@@ -27,7 +27,7 @@ flowchart LR
     ROOT --> D["检索<br/>混合检索与 RRF · 过滤检索 · 查询改写 · 重排序"]
     ROOT --> E["生成<br/>上下文增强 · 上下文拼装 · 引用与幻觉"]
     ROOT --> F["评估与排查<br/>检索指标 · 生成指标 · 问题定位"]
-    ROOT --> G["进阶<br/>GraphRAG · Agentic RAG"]
+    ROOT --> G["进阶<br/>GraphRAG · Agentic RAG · Text2SQL"]
     ROOT --> H["生产化<br/>权限与多租户 · 安全 · 性能与成本 · Spring AI · 场景设计"]
 ```
 
@@ -54,6 +54,7 @@ flowchart LR
 | 45-17 | RAG 回答错了，怎么一步步定位是哪个环节的问题？ | ★★★ |
 | 45-18 | GraphRAG 是什么？什么场景值得用？ | ★★★ |
 | 45-19 | Agentic RAG 和普通 RAG 有什么区别？ | ★★ |
+| 45-25 | 用户问的是统计数字，RAG 答不了怎么办？Text2SQL 怎么做才可靠？ | ★★★ |
 | 45-20 | 多租户、文档权限在 RAG 里怎么做？ | ★★★ |
 | 45-21 | RAG 有哪些安全风险？ | ★★★ |
 | 45-22 | RAG 的性能和成本怎么估算、怎么优化？ | ★★★ |
@@ -2101,6 +2102,149 @@ flowchart TD
 **架构师加分点**
 
 - 检索工具本身就是一个普通 RAG 流水线（混合检索、重排序、拼装），Agent 只负责决定"查什么、查几次"。把这两层分开，检索质量的改进可以在两种模式之间共享，也可以单独评测。
+
+---
+
+### 45-25 用户问的是统计数字，RAG 答不了怎么办？Text2SQL 怎么做才可靠？
+
+> ★★★ ｜ 资深 / 架构师 ｜ 中频
+
+**考察意图**："上个月退款最多的品类是什么"这类问题，答案不在任何一段文档里，要算出来。面试官想看你是否清楚 RAG 的边界，以及能否设计一条**安全、可验证**的"自然语言查数据"链路。
+
+**30 秒版回答**：
+
+- RAG 擅长**找到相关的文字**，不擅长**聚合计算**。统计类问题要走另一条路：让模型把问题翻译成 SQL，执行后再解释结果，这就是 Text2SQL。
+- 一条可靠的链路包含这些环节：**理解问题 → 检索相关的表结构 → 生成 SQL → 执行前检查 → 执行 → 出错则把错误信息交给模型修正（有限次数）→ 解释结果**。
+- 准确率的瓶颈通常不在模型，而在**语义信息**：
+  - 表和列的业务含义（`status = 3` 是什么意思）；
+  - **指标口径**（"活跃用户"按登录算还是按下单算，"销售额"含不含退款）；
+  - 表之间怎么关联；
+  - 一批"问题 → 正确 SQL"的示例。
+- 安全边界**不能靠提示词**，要靠数据库本身：
+  - 专用的**只读账号**，只授权允许查询的表和列；
+  - 多租户和行级权限在视图或数据库的行级安全策略里强制，而不是指望模型记得加 `WHERE tenant_id = ?`；
+  - 查询超时、返回行数上限；
+  - 连接从库或数仓，不连交易主库。
+- 更稳妥的产品形态：**不让模型自由写 SQL**，而是让它从预先定义好的指标和维度里做选择，由程序拼出 SQL。灵活性低一些，但口径一致、结果可信。
+
+**深入剖析**
+
+```mermaid
+flowchart TD
+    A["用户问题"] --> B{"是查文档<br/>还是查数据？"}
+    B -->|"查文档"| R["走 RAG 检索"]
+    B -->|"查数据"| C["检索相关的表、列、指标口径、示例 SQL"]
+    C --> D["模型生成 SQL"]
+    D --> E["执行前检查<br/>单条查询、只读、表白名单、强制 LIMIT"]
+    E -->|"不通过"| F["拒绝，或把原因反馈给模型重写"]
+    E -->|"通过"| G["用只读账号在从库执行<br/>带超时和行数上限"]
+    G -->|"SQL 报错"| F
+    G -->|"成功"| H["模型根据结果作答<br/>附上 SQL 和口径说明"]
+    F -->|"不超过 N 次"| D
+```
+
+**表结构也要做检索**。库里有几百张表时，不能把所有表结构都塞进提示词：既占上下文，又会让模型选错表。做法和文档检索一样：把每张表的"表名、表注释、列名、列注释、枚举值说明、常见用法"整理成一段文字并建索引，按用户的问题取回最相关的几张表。这一步的质量直接决定后面生成的 SQL 对不对，而它依赖的**注释和口径说明，大多需要人来补**。
+
+**执行前检查**。下面是一个最小的检查器（本机 JDK 25 运行过）。它是**第二道防线**，第一道防线是只读账号和最小授权：
+
+```java
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * 对模型生成的 SQL 做执行前检查。这只是第二道防线，真正的安全边界是"只读账号 + 只授权允许查询的表和列"
+ */
+public final class SqlGuardDemo {
+
+    private static final int DEFAULT_LIMIT = 200;
+    private static final Set<String> ALLOWED_TABLES = Set.of("orders", "order_item", "product");
+    private static final Pattern FORBIDDEN = Pattern.compile(
+            "\\b(insert|update|delete|drop|truncate|alter|create|grant|revoke|replace|call|load|into\\s+outfile|sleep|benchmark)\\b");
+    private static final Pattern TABLE_REF = Pattern.compile("\\b(?:from|join)\\s+([a-z_][a-z0-9_.]*)");
+    private static final Pattern HAS_LIMIT = Pattern.compile("\\blimit\\s+\\d+\\s*$");
+
+    record Result(boolean allowed, String sqlOrReason) { }
+
+    static Result check(String rawSql) {
+        String sql = rawSql.strip();
+        if (sql.endsWith(";")) {
+            sql = sql.substring(0, sql.length() - 1).strip();
+        }
+        String lower = sql.toLowerCase(Locale.ROOT);
+        if (lower.contains(";")) {
+            return new Result(false, "只允许单条语句");
+        }
+        if (lower.contains("--") || lower.contains("/*") || lower.contains("#")) {
+            return new Result(false, "不允许注释");
+        }
+        if (!lower.startsWith("select") && !lower.startsWith("with")) {
+            return new Result(false, "只允许查询语句");
+        }
+        Matcher forbidden = FORBIDDEN.matcher(lower);
+        if (forbidden.find()) {
+            return new Result(false, "包含禁止的关键字：" + forbidden.group(1));
+        }
+        Matcher tables = TABLE_REF.matcher(lower);
+        while (tables.find()) {
+            if (!ALLOWED_TABLES.contains(tables.group(1))) {
+                return new Result(false, "表不在白名单内：" + tables.group(1));
+            }
+        }
+        if (!HAS_LIMIT.matcher(lower).find()) {
+            sql = sql + " LIMIT " + DEFAULT_LIMIT;       // 没有 LIMIT 就强制加上，防止拉全表
+        }
+        return new Result(true, sql);
+    }
+
+    public static void main(String[] args) {
+        List<String> cases = List.of(
+                "SELECT product_id, SUM(amount) AS total FROM order_item GROUP BY product_id ORDER BY total DESC LIMIT 10",
+                "select * from orders where user_id = 10086",
+                "SELECT * FROM orders; DROP TABLE orders",
+                "DELETE FROM orders WHERE id = 1",
+                "SELECT * FROM user_password",
+                "SELECT * FROM orders WHERE id = 1 -- AND tenant_id = 7",
+                "WITH t AS (SELECT user_id FROM orders) SELECT * FROM t JOIN mysql.user u ON 1 = 1");
+        for (String sql : cases) {
+            Result r = check(sql);
+            System.out.println((r.allowed() ? "放行  " : "拒绝  ") + r.sqlOrReason());
+        }
+    }
+}
+```
+
+```text
+放行  SELECT product_id, SUM(amount) AS total FROM order_item GROUP BY product_id ORDER BY total DESC LIMIT 10
+放行  select * from orders where user_id = 10086 LIMIT 200
+拒绝  只允许单条语句
+拒绝  只允许查询语句
+拒绝  表不在白名单内：user_password
+拒绝  不允许注释
+拒绝  表不在白名单内：t
+```
+
+最后一行值得注意：那条 SQL 确实应该被拒绝（它关联了 `mysql.user`），但被拒绝的理由是公用表表达式的别名 `t` 不在白名单里。也就是说，这个基于正则的检查器会**误拦合法的 `WITH` 查询**，换一种写法也可能漏掉不该放行的。这正是正则方案的局限：它不理解 SQL 的结构。生产环境应该用 SQL 解析器把语句解析成语法树，再检查语句类型、涉及的表和列；并且始终记住，检查器写得再好也可能有遗漏，**数据库账号的权限才是最后的边界**。
+
+**追问链**
+
+1. **Text2SQL 的效果怎么评估？**
+   比较**执行结果**，而不是比较 SQL 文本。同一个问题可以有很多种等价的写法，文本不同不代表错误。准备一批"问题 → 标准结果"的用例，在固定的测试数据上执行模型生成的 SQL，结果一致就算对。还要单独统计：SQL 能否执行、是否选对了表、口径是否正确。评估的一般方法见 45-16。
+2. **问题本身有歧义怎么办？**
+   "上个月的销售额"里，"上个月"是自然月还是最近 30 天，"销售额"是下单金额还是支付金额。模型不会知道你们公司的口径，会自己选一个，然后给出一个看起来很确定的数字。对策是：把指标口径写进语义层；检测到问题里有未定义的口径时**反问用户**；在回答里明确写出采用的口径和时间范围。查询澄清的方法见 45-11。
+3. **怎么保证用户只能查到自己有权限的数据？**
+   不能依赖模型在 SQL 里加过滤条件，它可能忘记，用户也可能通过提问诱导它去掉。权限要在模型接触不到的地方强制：为每个租户或角色提供已经过滤好的视图；或者使用数据库的行级安全策略，在连接上设置当前用户的身份；或者在 SQL 解析之后由程序改写，强制追加过滤条件。和文档权限的思路一致，见 45-20。
+4. **查出来几万行，怎么给模型？**
+   不给。模型不适合处理大量的行数据，既占上下文，又容易算错。让数据库完成聚合，只把最终的几行到几十行结果交给模型去解释；确实需要明细时，以表格或文件的形式直接返回给用户，模型只生成一句说明。
+
+**生产实践 / 踩坑**
+
+- **图省事给了读写账号**：模型生成或者被诱导生成了修改数据的语句。账号必须是只读的，并且只授权业务允许查询的表和列，密码、手机号这类敏感列不授权。
+- **直接连交易主库**：模型生成的 SQL 没有人审核，很容易出现缺少条件的大表关联，一条慢查询就能拖垮在线业务。连从库或数仓，并设置语句级的超时。
+- **数字答错了但没人发现**：文字回答错了用户还可能察觉，一个看起来合理的数字很难被质疑，却会被拿去做决策。回答里必须附上执行的 SQL、数据的时间范围和口径，让用户能够核对；重要的指标优先走预定义的指标查询，不走自由生成。
+- **模型编造不存在的列**：提示词里的表结构不完整，或者列名不直观时，模型会按"应该有的名字"去猜。执行前用元数据校验表名和列名，报错信息要具体到"哪张表没有哪一列"，模型才能据此修正，见[《44 AI Agent》](44-AI-Agent.md)44-08 里关于工具错误信息的要求。
 
 ---
 
