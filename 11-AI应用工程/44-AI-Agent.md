@@ -14,6 +14,7 @@
 >   - Claude 文档：[工具调用](https://platform.claude.com/docs/en/agents-and-tools/tool-use/overview)、[提示词缓存](https://platform.claude.com/docs/en/build-with-claude/prompt-caching)
 >   - Spring AI：[Tool Calling](https://docs.spring.io/spring-ai/reference/api/tools.html)、[ChatClient](https://docs.spring.io/spring-ai/reference/api/chatclient.html)、[MCP](https://docs.spring.io/spring-ai/reference/api/mcp/mcp-overview.html)
 >   - LangChain4j：[Agents](https://docs.langchain4j.dev/tutorials/agents)
+> - 2026-11-12 补充的 44-25 ~ 44-30 另外查阅了：[Agent Skills 规范](https://agentskills.io/specification)、Claude 文档的 [Agent Skills](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview)、[Computer use tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/computer-use-tool)、[Extended thinking](https://platform.claude.com/docs/en/build-with-claude/extended-thinking)、[Effort](https://platform.claude.com/docs/en/build-with-claude/effort)，Anthropic 工程文章 [Equipping agents for the real world with Agent Skills](https://www.anthropic.com/engineering/equipping-agents-for-the-real-world-with-agent-skills)（2025-10），OpenAI 的 [Reasoning 指南](https://developers.openai.com/api/docs/guides/reasoning)，[LangGraph 概览](https://docs.langchain.com/oss/python/langgraph/overview)、[LangGraph4j](https://github.com/langgraph4j/langgraph4j)、[Spring AI Alibaba](https://github.com/alibaba/spring-ai-alibaba) 的项目主页，[LiteLLM 路由](https://docs.litellm.ai/docs/routing)与[可靠性](https://docs.litellm.ai/docs/proxy/reliability)文档，[vLLM 文档](https://docs.vllm.ai/en/latest/)。这几题里的参数名、取值和版本号都以查阅当天的页面为准，这个领域变化很快，使用前请再核对一次。
 > - 论文与标准：ReAct（[arXiv:2210.03629](https://arxiv.org/abs/2210.03629)）、τ-bench 提出的 pass^k（[arXiv:2406.12045](https://arxiv.org/abs/2406.12045)）、[OWASP Top 10 for LLM Applications 2025](https://genai.owasp.org/llm-top-10/)。
 > - 本机运行（macOS 27.2、Apple M1 Max、JDK 25）：本类 10 段代码只依赖 JDK，大模型换成了按固定规则回复的模拟实现，没有调用任何真实模型服务，文中贴出的都是实际运行输出。Spring AI 和 LangChain4j 的代码标注了「示意代码，未编译」。
 > 相关分类：[《45 RAG》](45-RAG.md)、[《20 MQ 通用与选型》](../05-消息队列/20-MQ通用与选型.md)（幂等）、[《26 高可用》](../06-三高与架构/26-高可用.md)（超时、重试、熔断）、[《32 日志与可观测性》](../07-工程实践与稳定性/32-日志与可观测性.md)、[《39 网络安全》](../08-计算机基础/39-网络安全.md)、[《05 Spring》](../02-框架与容器/05-Spring.md)
@@ -22,14 +23,14 @@
 
 ```mermaid
 flowchart LR
-    ROOT["AI Agent"] --> A["基础<br/>Agent 定义 · Token 与上下文 · 函数调用 · Agent Loop"]
+    ROOT["AI Agent"] --> A["基础<br/>Agent 定义 · Token 与上下文 · 函数调用<br/>Agent Loop · 推理与 effort"]
     ROOT --> B["编排<br/>ReAct · 五种工作流模式 · 多 Agent"]
-    ROOT --> C["工具与协议<br/>工具设计 · MCP · A2A · 幂等"]
+    ROOT --> C["工具与协议<br/>工具设计 · MCP · A2A · 幂等<br/>Skills · Computer Use"]
     ROOT --> D["记忆与上下文<br/>短期 / 长期记忆 · 上下文工程 · 提示词缓存"]
-    ROOT --> E["可靠性<br/>检查点与人工审批 · 防跑飞 · 结构化输出"]
+    ROOT --> E["可靠性<br/>检查点与人工审批 · 防跑飞<br/>结构化输出 · 模型网关与降级"]
     ROOT --> F["安全<br/>提示词注入 · 权限与身份"]
-    ROOT --> G["评估与运营<br/>评测 · 可观测 · 成本"]
-    ROOT --> H["Java 落地<br/>Spring AI · LangChain4j · 场景设计"]
+    ROOT --> G["评估与运营<br/>评测 · 可观测 · 成本 · 推理部署基础"]
+    ROOT --> H["Java 落地<br/>Spring AI · LangChain4j<br/>状态图编排 · 场景设计"]
 ```
 
 ## 题目索引
@@ -40,6 +41,7 @@ flowchart LR
 | 44-02 | 做 Agent 必须懂的大模型基础：Token、上下文窗口、温度、无状态 | ★ |
 | 44-03 | 函数调用（Tool Calling）的原理：模型真的调用了函数吗？ | ★★ |
 | 44-04 | 手写一个 Agent Loop：循环怎么转，什么时候停？ | ★★ |
+| 44-27 | 推理模型和"思考"是怎么回事？思考预算和 effort 档位怎么用？ | ★★ |
 | 44-05 | ReAct、Plan-and-Execute、评估-优化循环分别适合什么场景？ | ★★ |
 | 44-06 | 用工作流还是用 Agent？五种常见编排模式怎么选？ | ★★ |
 | 44-07 | 什么时候值得用多 Agent？怎么拆分、怎么协作？ | ★★★ |
@@ -47,18 +49,23 @@ flowchart LR
 | 44-09 | MCP 是什么？架构、能力和传输方式，最新版本改了什么？ | ★★ |
 | 44-10 | MCP、Function Calling、A2A 之间是什么关系？ | ★★ |
 | 44-11 | 有写操作的工具怎么避免重复执行？ | ★★★ |
+| 44-25 | Agent Skills 是什么？它和工具、MCP、系统提示词是什么关系？ | ★★ |
+| 44-26 | Computer Use 是什么？让 Agent 直接操作界面，什么时候值得用？ | ★★ |
 | 44-12 | Agent 的记忆怎么设计？短期记忆和长期记忆分别存什么？ | ★★ |
 | 44-13 | 上下文快满了怎么办？上下文工程有哪些手段？ | ★★★ |
 | 44-14 | 系统提示词和上下文怎么组织，才能稳定、好维护、命中缓存？ | ★★ |
 | 44-15 | 长任务怎么做断点续跑和人工审批？ | ★★★ |
 | 44-16 | 怎么防止 Agent 死循环、跑飞、成本失控？ | ★★ |
 | 44-17 | 怎么让模型稳定地输出结构化数据？ | ★★ |
+| 44-29 | 为什么需要模型网关？主模型不可用时怎么切换到备用模型？ | ★★★ |
 | 44-18 | 什么是提示词注入？为什么不能只靠提示词来防？ | ★★★ |
 | 44-19 | Agent 代表用户操作时，权限、身份和敏感数据怎么处理？ | ★★★ |
 | 44-20 | 怎么评估一个 Agent 好不好？ | ★★★ |
 | 44-21 | Agent 的可观测性怎么做？出了问题怎么排查？ | ★★ |
 | 44-22 | Agent 的成本和延迟怎么优化？ | ★★ |
+| 44-30 | 自己部署大模型要懂哪些基础？首 Token 延迟、KV Cache、批处理分别是什么？ | ★★ |
 | 44-23 | Java 怎么落地：Spring AI 和 LangChain4j 怎么选？ | ★★ |
+| 44-28 | LangGraph 这类"状态图"编排框架解决什么问题？Java 里有哪些选择？ | ★★ |
 | 44-24 | 场景题：设计一个能查订单、能退款的客服 Agent | ★★★ |
 
 ---
@@ -428,6 +435,72 @@ RunResult[stopReason=MAX_STEPS, answer=null, steps=4, toolCalls=4, historySize=9
 **架构师加分点**
 
 - 把循环、工具执行、权限策略、状态存储拆成独立组件：循环只负责编排；权限策略是一个可以单独测试的纯函数（见 44-18 的代码）；状态存储可以替换（内存、数据库）。这样做审批、断点续跑、评测回放时，都不需要改动循环本身。
+
+---
+
+### 44-27 推理模型和"思考"是怎么回事？思考预算和 effort 档位怎么用？
+
+> ★★ ｜ 资深 ｜ 高频
+
+**考察意图**：现在的主力模型都带"先思考再回答"的能力。面试官想确认你知道它对延迟、成本、输出预算和工具调用循环的影响，而不是只知道"开了更聪明"。
+
+**30 秒版回答**：
+
+- 推理模型在给出最终回答之前，会先生成一段**内部推理**。这段推理也是模型输出的 token：**按输出 token 计费、占用输出预算、增加延迟**。
+- 控制方式已经从"指定预算"演进到"指定档位"（截至 2026-11 的官方文档）：
+
+| | Claude | OpenAI |
+| --- | --- | --- |
+| 旧方式 | `thinking: {type: "enabled", budget_tokens: N}`，最小 1024。文档已标为废弃，在较新的模型上会返回 400 | — |
+| 现在的方式 | 自适应思考：`thinking: {type: "adaptive"}`，由模型自己决定要不要想、想多少；用 `output_config.effort` 控制深度 | `reasoning.effort` |
+| 档位取值 | `low`、`medium`、`high`、`xhigh`、`max` | `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`，可用的取值因模型而异 |
+| 推理内容是否可见 | 返回的是**摘要后**的思考内容 | 推理 token 不通过 API 返回 |
+
+- 对工程的四个影响：
+  1. **延迟和成本**：档位越高，推理 token 越多。简单任务用高档位是浪费；
+  2. **输出预算要留够**：推理 token 算在输出上限之内，上限设得太小，可能推理还没结束就被截断，拿不到正文；
+  3. **工具调用循环里要把推理内容原样传回去**：模型下一轮要接着之前的推理继续，丢掉它会报错或者降低效果；
+  4. **不要把推理内容当成业务数据**：拿到的是摘要，也不保证和模型的真实计算过程一致，不能用它做程序分支判断。
+
+**深入剖析**
+
+```mermaid
+flowchart TD
+    A["请求：问题 + 工具定义 + effort 档位"] --> B["模型内部推理<br/>计入输出 token，用户看不到完整内容"]
+    B --> C{"需要调用工具？"}
+    C -->|"需要"| D["返回：推理内容块 + 工具调用"]
+    D --> E["应用执行工具"]
+    E --> F["下一次请求：原样带上推理内容块<br/>+ 工具调用 + 工具结果"]
+    F --> B
+    C -->|"不需要"| G["返回最终回答"]
+```
+
+**档位怎么选**。不要凭感觉，用评测集把几个档位各跑一遍，得到"准确率、成本、延迟"三条曲线，选满足业务要求的最低档位：
+
+| 任务类型 | 建议 |
+| --- | --- |
+| 分类、抽取、路由、格式转换 | 最低档位或关闭推理。这类任务多想没有收益 |
+| 普通问答、客服、带一两次工具调用的任务 | 低到中档 |
+| 多步规划、复杂代码、需要权衡多个约束的分析 | 高档位，并给足输出预算 |
+
+Claude 文档的说法是：在支持自适应思考的模型上，推荐用 effort 来控制思考深度；effort 影响的不只是思考，也包括回答的详略和工具调用的积极程度。
+
+**追问链**
+
+1. **有了推理模型，提示词里还要写"请一步一步思考"吗？**
+   一般不需要，写了也不会更好。更有效的是把**判断标准和约束**说清楚：要权衡哪些因素、什么情况下应该停下来问用户、输出要满足什么条件。思考多少交给档位去控制。ReAct 这类显式的"思考—行动"格式和推理模型的关系见 44-05。
+2. **输出上限应该怎么设？**
+   上限是"推理 + 正文"的总和。OpenAI 的文档建议刚开始试验时至少预留 25000 个 token 给推理和输出。实际做法是：按评测中观察到的推理 token 分布设定上限，并且**检查停止原因**。因为达到上限而停止时，要么提高上限重试，要么降低档位，不能把半截内容当成正常结果返回。
+3. **流式输出时，用户会不会觉得卡住了？**
+   会。推理阶段没有正文可以输出，首字延迟会明显变长。界面上要有"正在思考"的状态；能拿到思考摘要的流式事件时可以展示出来；对延迟敏感的入口（搜索框、自动补全）用低档位或者不带推理的小模型。
+4. **能不能用推理内容来排查模型为什么答错？**
+   可以作为线索，但不能当作证据。它经过了摘要，也可能和模型内部的实际计算不一致。排查问题主要还是看输入的上下文是否完整、工具返回是否正确、评测中同类用例的表现，见 44-21。
+
+**生产实践 / 踩坑**
+
+- **所有请求统一用最高档位**：成本和延迟成倍上升，而大多数请求并不需要。按入口或任务类型配置档位，把它当作和模型名称、温度一样的参数纳入配置管理和评测。
+- **自己拼接历史消息时丢掉了推理内容块**：只保留了文本和工具调用，下一轮请求报错，或者模型表现得像"忘了自己刚才的计划"。使用官方 SDK 时把上一轮的响应内容**整体**放回消息列表，不要挑着放。
+- **切换模型后参数不兼容**：旧模型用 `budget_tokens`，新模型只接受自适应思考，直接返回 400。模型升级要过一遍参数兼容性，并把参数的拼装收敛在一处，见 44-29。
 
 ---
 
@@ -1059,6 +1132,240 @@ BUSINESS_KEY  refunds=1              refunds=1
 2. **超时后告诉模型什么？** 要告诉模型"结果未知，请先调用 query_refund 查询"，不要说"失败"。"失败"这个词会诱导模型直接重试。
 3. **MCP 的 `idempotentHint` 能用吗？** 它只是一个提示，而且来自不可信的 Server 时根本不能信。幂等必须由下游的实现来保证。
 4. **这和消息队列的幂等有什么关系？** 原理完全相同。上游只能保证"至少执行一次"，下游必须保证幂等，详见[《20 MQ 通用与选型》](../05-消息队列/20-MQ通用与选型.md)。
+
+---
+
+### 44-25 Agent Skills 是什么？它和工具、MCP、系统提示词是什么关系？
+
+> ★★ ｜ 资深 / 架构师 ｜ 中频
+
+**考察意图**：Skills 是 2025 年底出现、2026 年被广泛采用的做法。面试官想看你是否理解它解决的是"上下文装不下所有做事方法"这个问题，以及能否在自己的 Java 应用里实现同样的机制。
+
+**30 秒版回答**：
+
+- 一个 Skill 就是**一个目录**：里面必须有一个 `SKILL.md`，开头是 YAML 元数据（`name`、`description`），后面是 Markdown 写的操作说明；还可以带 `scripts/`（可执行脚本）、`references/`（参考资料）、`assets/`（模板等）。Anthropic 在 2025-10-16 的工程文章中提出，格式规范公开在 agentskills.io。
+- 它解决的问题：做事的方法（流程、规范、口径、模板）越来越多，全写进系统提示词会把上下文占满，而且绝大部分内容在一次任务里用不到。
+- 核心机制是**渐进式披露**，分三层加载：
+  1. **元数据**：所有 Skill 的 `name` 和 `description`，启动时就放进上下文，每个约 100 个 token；
+  2. **正文**：模型判断某个 Skill 和当前任务相关时，才读入它的 `SKILL.md` 正文，规范建议控制在 5000 个 token（或 500 行）以内；
+  3. **附带文件**：正文里提到的脚本和参考资料，真正用到时才读；脚本是被执行的，只有它的**输出**进入上下文。
+- 和其他机制的分工（这是我的归纳，不是官方定义）：**工具和 MCP 提供"能做什么"，Skill 提供"这类事应该怎么做"**。两者互补：Skill 的正文里经常写的就是"先调用哪个工具、再按什么规则判断"。
+
+**深入剖析**
+
+| 机制 | 内容 | 什么时候进入上下文 | 适合放什么 |
+| --- | --- | --- | --- |
+| 系统提示词 | 角色、底线、通用规则 | 每次请求都在 | 任何任务都要遵守的内容 |
+| 工具 / MCP | 可以调用的动作及其参数 | 工具定义每次都在，结果在调用后进入 | 查询、写入、调用外部系统 |
+| Skill | 某一类任务的做法，可附带脚本和资料 | 元数据一直在，正文和文件按需加载 | 流程、规范、模板、领域口径 |
+| RAG | 知识库里的事实片段 | 检索命中后进入 | 量大、会变化的事实性知识 |
+
+规范对元数据的约束（[agentskills.io 规范](https://agentskills.io/specification)）：`name` 为 1 到 64 个字符，只能用小写字母、数字和连字符，并且**必须和目录名一致**；`description` 为 1 到 1024 个字符，不能为空。
+
+下面用 JDK 实现这套加载机制的最小版本（本机 JDK 25 运行过）。三个示例目录里，`broken` 的 `name` 和目录名不一致，会被跳过：
+
+```java
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Stream;
+
+/**
+ * Skill 的渐进式披露：启动时只读每个 SKILL.md 的 name 和 description，用到时才读正文，脚本和参考资料更晚才读
+ */
+public final class SkillLoaderDemo {
+
+    private static final String SKILL_FILE = "SKILL.md";
+    private static final String FRONTMATTER_FENCE = "---";
+    private static final int MAX_NAME_LENGTH = 64;
+    private static final int MAX_DESCRIPTION_LENGTH = 1024;
+
+    /** 只包含元数据：这部分会一直留在系统提示词里 */
+    record SkillMeta(String name, String description, Path dir) { }
+
+    /** 第一层：扫描目录，只解析 frontmatter */
+    static List<SkillMeta> scan(Path root) throws IOException {
+        List<SkillMeta> metas = new ArrayList<>();
+        try (Stream<Path> dirs = Files.list(root)) {
+            for (Path dir : dirs.filter(Files::isDirectory).sorted().toList()) {
+                Path file = dir.resolve(SKILL_FILE);
+                if (!Files.exists(file)) {
+                    continue;
+                }
+                Map<String, String> fm = frontmatter(Files.readAllLines(file));
+                String name = fm.get("name");
+                String description = fm.get("description");
+                // 规范要求：name 必须和目录名一致，长度有上限；description 不能为空
+                if (name == null || !name.equals(dir.getFileName().toString()) || name.length() > MAX_NAME_LENGTH
+                        || description == null || description.isBlank() || description.length() > MAX_DESCRIPTION_LENGTH) {
+                    System.out.println("skip invalid skill: " + dir.getFileName());
+                    continue;
+                }
+                metas.add(new SkillMeta(name, description, dir));
+            }
+        }
+        return metas;
+    }
+
+    private static Map<String, String> frontmatter(List<String> lines) {
+        Map<String, String> result = new LinkedHashMap<>();
+        if (lines.isEmpty() || !FRONTMATTER_FENCE.equals(lines.get(0).trim())) {
+            return result;
+        }
+        for (int i = 1; i < lines.size() && !FRONTMATTER_FENCE.equals(lines.get(i).trim()); i++) {
+            int colon = lines.get(i).indexOf(':');
+            if (colon > 0) {
+                result.put(lines.get(i).substring(0, colon).trim(), lines.get(i).substring(colon + 1).trim());
+            }
+        }
+        return result;
+    }
+
+    /** 第二层：模型决定使用某个 Skill 时，才把正文读进上下文 */
+    static String activate(SkillMeta meta) throws IOException {
+        List<String> lines = Files.readAllLines(meta.dir().resolve(SKILL_FILE));
+        int end = lines.subList(1, lines.size()).indexOf(FRONTMATTER_FENCE) + 1;
+        return String.join("\n", lines.subList(end + 1, lines.size())).strip();
+    }
+
+    public static void main(String[] args) throws IOException {
+        Path root = Files.createTempDirectory("skills");
+        write(root, "refund-policy", "---\nname: refund-policy\ndescription: 处理退款申请时使用。包含退款规则、金额计算方法和需要人工审批的情形。\n---\n"
+                + "# 退款处理\n\n1. 先调用订单查询工具确认订单状态。\n2. 按 references/rules.md 判断是否符合退款条件。\n"
+                + "3. 金额超过审批线时，转人工审批。\n", "references/rules.md", "（三千字的退款规则全文）".repeat(200));
+        write(root, "weekly-report", "---\nname: weekly-report\ndescription: 生成周报时使用。包含周报模板和数据口径。\n---\n# 周报\n\n按 assets/template.md 填写。\n",
+                "assets/template.md", "（周报模板）".repeat(100));
+        write(root, "broken", "---\nname: another-name\ndescription: 目录名和 name 不一致\n---\n正文\n", null, null);
+
+        List<SkillMeta> metas = scan(root);
+        StringBuilder systemPrompt = new StringBuilder("可用的 Skill：\n");
+        metas.forEach(m -> systemPrompt.append("- ").append(m.name()).append("：").append(m.description()).append('\n'));
+        System.out.println(systemPrompt);
+        System.out.println("第一层（常驻上下文）字符数 = " + systemPrompt.length());
+
+        String body = activate(metas.get(0));
+        System.out.println("第二层（激活 refund-policy 后加载正文）字符数 = " + body.length());
+        long reference = Files.size(metas.get(0).dir().resolve("references/rules.md"));
+        System.out.println("第三层（正文里提到、需要时才读的参考资料）字节数 = " + reference);
+    }
+
+    private static void write(Path root, String name, String skillMd, String extraPath, String extra) throws IOException {
+        Path dir = Files.createDirectories(root.resolve(name));
+        Files.writeString(dir.resolve(SKILL_FILE), skillMd);
+        if (extraPath != null) {
+            Path p = dir.resolve(extraPath);
+            Files.createDirectories(p.getParent());
+            Files.writeString(p, extra);
+        }
+    }
+}
+```
+
+```text
+skip invalid skill: broken
+可用的 Skill：
+- refund-policy：处理退款申请时使用。包含退款规则、金额计算方法和需要人工审批的情形。
+- weekly-report：生成周报时使用。包含周报模板和数据口径。
+
+第一层（常驻上下文）字符数 = 99
+第二层（激活 refund-policy 后加载正文）字符数 = 83
+第三层（正文里提到、需要时才读的参考资料）字节数 = 7200
+```
+
+三层的大小差了两个数量级。如果把退款规则全文直接写进系统提示词，每一次请求（包括和退款无关的）都要为这 7200 字节付费。
+
+**追问链**
+
+1. **`description` 应该怎么写？**
+   模型只凭 `name` 和 `description` 决定要不要加载这个 Skill，所以它要回答两个问题：**这个 Skill 能做什么**，以及**什么情况下应该用它**。"退款相关"这种写法太模糊，模型很可能不触发；写成"处理退款申请时使用，包含退款规则、金额计算方法和需要人工审批的情形"，触发条件就明确了。它的作用和工具描述一样，见 44-08。
+2. **Skill 和 RAG 知识库有什么区别？**
+   RAG 按相似度取回**片段**，适合回答"某条规定是什么"；Skill 是**整体加载**的一份操作说明，适合"完成这类任务要按什么步骤做"。流程性的内容如果切成片段再检索，步骤很容易缺一块。两者可以配合：Skill 规定流程，其中某一步是"到知识库里检索相关条款"。
+3. **自己的 Java 应用没有运行脚本的环境，怎么用这个思路？**
+   可以只实现前两层，用两个工具来完成按需加载：
+   - 启动时扫描 Skill 目录，把所有 `name` 和 `description` 拼进系统提示词；
+   - 提供工具 `load_skill(name)` 返回正文，`read_skill_file(name, path)` 返回附带的参考资料，路径要限制在该 Skill 的目录内；
+   - 脚本的执行需要沙箱。没有沙箱就只使用文档型的 Skill，把确定性的计算写成普通的 Java 工具。
+4. **Skill 越来越多之后会有什么问题？**
+   - 元数据本身也占上下文，几百个 Skill 就是几万个 token；
+   - 描述相近的 Skill 会互相抢，模型选错；
+   - 内容过时没人维护。
+   对策和管理工具一样：按场景只暴露相关的一组、定期合并和清理、**把 Skill 纳入评测**，每次修改后跑一遍对应的用例。
+
+**生产实践 / 踩坑**
+
+- **把 Skill 当成普通文档随便装**：Skill 可以带可执行脚本，正文里的指令也会被模型执行。Claude 文档的要求是只使用可信来源的 Skill，并把安装 Skill 当成安装软件来对待：审查全部文件，警惕其中访问外部地址的内容。来自第三方的 Skill 属于供应链风险，见 44-18。
+- **正文写成长篇大论**：正文一旦加载就一直留在上下文里。详细的规则、长表格、示例放到 `references/` 里，正文只写流程和"什么时候去看哪份资料"。
+- **把必须遵守的底线写在 Skill 里**：Skill 是否被加载取决于模型的判断。权限、合规、金额上限这类规则不能依赖"模型会记得去读"，要写在系统提示词里，并且用代码做硬校验，见 44-19。
+
+---
+
+### 44-26 Computer Use 是什么？让 Agent 直接操作界面，什么时候值得用？
+
+> ★★ ｜ 架构师 ｜ 低频
+
+**考察意图**：能否讲清它的工作方式仍然是工具调用，判断它和"调 API""写自动化脚本"各自的适用范围，并且对安全风险有清醒的认识。
+
+**30 秒版回答**：
+
+- Computer Use 让模型像人一样操作图形界面：**看截图 → 决定下一步的鼠标键盘动作 → 程序执行 → 再截图**，循环直到任务完成。
+- 它**仍然是工具调用**。模型不直接接触电脑，只是输出"在某个坐标点击""输入一段文字""按某个键""滚动""截图"这样的动作，由你的程序在受控的环境里执行，再把新的截图作为工具结果传回去。
+- 适合：**没有 API 的系统**（老旧的内部系统、第三方网站）、跨多个应用的操作、界面测试。
+- 不适合：有 API 或者能写稳定脚本的场景。和调用 API 相比，它**慢**（每一步都要截图、推理）、**贵**（截图占大量 token）、**不够稳定**（坐标偏差、界面变化）。
+- 安全是首要问题：屏幕上的任何文字都可能是注入的指令，而它又真的能点击和输入。必须在**隔离的环境**里运行，重要操作要人工确认。
+
+**深入剖析**
+
+```mermaid
+sequenceDiagram
+    participant M as 模型
+    participant P as 你的程序
+    participant V as 隔离的虚拟桌面
+    P->>M: 任务描述 + 工具定义
+    M-->>P: 动作：截图
+    P->>V: 截取屏幕
+    V-->>P: 截图
+    P->>M: 工具结果：截图
+    M-->>P: 动作：点击坐标 x, y
+    P->>V: 执行点击
+    P->>M: 工具结果：新的截图
+    M-->>P: 任务完成，返回文字说明
+```
+
+三种让 Agent 操作外部系统的方式：
+
+| 方式 | 依赖什么 | 速度与成本 | 稳定性 | 适用 |
+| --- | --- | --- | --- | --- |
+| API / MCP 工具 | 对方提供接口 | 最快、最便宜 | 最高 | 只要有接口就用它 |
+| 基于页面结构的浏览器自动化 | 页面的 DOM 或无障碍树 | 中等 | 页面结构变化时会失效 | 网页操作、有固定流程 |
+| Computer Use | 只需要一块屏幕 | 最慢、最贵 | 最低，但适应性最强 | 没有接口、界面不固定、桌面应用 |
+
+Claude 文档里的要点（[Computer use tool](https://platform.claude.com/docs/en/agents-and-tools/tool-use/computer-use-tool)，2026-11 查阅）：
+
+- 动作包括截图、局部放大、各种点击、拖拽、移动鼠标、滚动、输入文字、按键、等待等；
+- 文档列出的当前工具类型是 `computer_toolset_20260801`，不需要额外的 beta 请求头；更早的 `computer_20251124` 需要。接入前以文档的当前版本为准；
+- 安全建议有四条：使用**权限最小的专用虚拟机或容器**；**不让它接触敏感数据**，包括账号的登录信息；用**域名白名单**限制它能访问的网站；涉及实际后果的操作（下单、发送、同意条款）要**人工确认**；
+- 针对提示词注入：模型做过抵抗注入的训练，服务端还有分类器检查截图等工具结果，发现可疑内容时引导模型向用户确认。这些只是额外的防线，上面的隔离手段仍然必须有。
+
+**追问链**
+
+1. **既然浏览器自动化更稳定，为什么还需要 Computer Use？**
+   传统的自动化脚本要为每个页面写选择器，页面一改就得维护；遇到验证流程、弹窗、布局变化这些脚本没预料到的情况就会卡住。Computer Use 的价值在于**适应性**：没见过的界面也能尝试操作。实际项目里经常组合使用：固定的步骤用脚本，脚本处理不了的环节交给模型。
+2. **怎么防止它被屏幕上的内容"指挥"？**
+   原则和 44-18 一样：**屏幕上的内容是数据，不是指令**，但不能指望模型百分之百分得清。真正起作用的是环境层面的限制：它能访问哪些网站、能用哪些账号、这些账号有多大权限、哪些动作必须经过人确认。假设注入一定会成功，再看最坏的后果能不能接受。
+3. **怎么观测和评估这种 Agent？**
+   每一步保存截图、动作和模型给出的理由，出问题时可以逐步回放。评估看任务完成率、平均步数、每个任务的成本和耗时。同一个任务每次走的路径可能不同，所以要多次运行看稳定性，见 44-20。
+4. **成本大概是什么量级？**
+   没有固定的数字，取决于屏幕分辨率和步数。可以确定的是：每一步都要发送一张截图，而历史截图会累积在上下文里，所以步数多的任务成本增长很快。控制手段是降低截图分辨率、只保留最近几张截图、设置步数上限，见 44-16。
+
+**生产实践 / 踩坑**
+
+- **在员工的真实电脑或者带着真实账号的浏览器里运行**：模型看得到屏幕上的一切，也能操作一切。必须使用专门的、用完即销毁的环境，账号单独申请并限制权限。
+- **用它去做有接口的事情**：本来一次接口调用就能完成的查询，变成了十几步的点击，又慢又容易错。评估方案时先问有没有接口、能不能推动对方提供接口。
+- **没有步数和时间上限**：界面卡住或者弹出了意料之外的窗口时，模型可能反复尝试同一个动作。上限、重复动作检测和超时都要有。
 
 ---
 
@@ -1819,6 +2126,181 @@ TicketView ticket = chatClient.prompt()
 
 ---
 
+### 44-29 为什么需要模型网关？主模型不可用时怎么切换到备用模型？
+
+> ★★★ ｜ 架构师 ｜ 中频
+
+**考察意图**：一个公司里有多个应用、接入多家模型之后，密钥、配额、成本、故障切换都需要一个统一的地方管理。面试官想看你是否有平台视角，以及是否清楚"切换模型"并不是改一个配置那么简单。
+
+**30 秒版回答**：
+
+- 模型网关是放在应用和模型服务之间的一层，职责有六项：
+  1. **统一接口**：应用只认一种调用格式和一个逻辑模型名，具体用哪家、哪个版本由网关决定；
+  2. **密钥集中管理**：真实的密钥只存在网关里，应用拿到的是可以随时吊销的内部凭证；
+  3. **路由与负载均衡**：同一个模型的多个部署、多个区域之间分配流量；
+  4. **重试与降级**：失败后重试，重试无效就切换到备用模型；
+  5. **限流与配额**：按应用、按团队限制请求数和 token 数；
+  6. **计量与审计**：统计每个应用的用量和成本，记录请求日志。
+- 降级链的顺序：**重试（带退避）→ 同一模型的其他部署 → 备用模型 → 固定的降级回复**。连续失败的部署要进入**冷却期**，这段时间内直接跳过。
+- 不是所有错误都该重试或切换，要按错误类型区别对待（见下表）。
+- **切换模型有代价**：不同模型对同一份提示词的表现不同，工具调用和结构化输出的行为也不同。备用模型必须**事先用评测集验证过**，否则故障切换等于把一个没测过的版本直接放到线上。
+
+**深入剖析**
+
+| 错误类型 | 例子 | 处理 |
+| --- | --- | --- |
+| 暂时性故障 | 超时、连接失败、服务端 5xx | 退避重试，无效则切换 |
+| 限流 | 429 | 尊重返回的等待时间；切换到其他部署或备用模型 |
+| 上下文超长 | 输入超过模型的上下文窗口 | 重试没有用。切换到上下文更长的模型，或者压缩上下文后再试 |
+| 内容策略拒绝 | 输入或输出被安全策略拦截 | 按业务策略处理，通常不应该自动换一家绕过 |
+| 请求本身有问题 | 参数错误、不支持的参数 | 不重试、不切换，直接返回错误 |
+
+下面是降级逻辑的最小实现（本机 JDK 25 运行过），模型用固定规则模拟：
+
+```java
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+
+/**
+ * 模型网关的核心逻辑：重试、失败后切换到备用模型、连续失败的模型进入冷却期
+ */
+public final class ModelGatewayDemo {
+
+    private static final int MAX_RETRIES = 1;
+    private static final int ALLOWED_FAILS = 2;
+    private static final long COOLDOWN_MILLIS = 30_000L;
+
+    /** 可重试的错误：超时、限流、服务端错误 */
+    static final class RetryableException extends RuntimeException {
+        RetryableException(String message) { super(message); }
+    }
+
+    /** 不可重试的错误：请求本身有问题，换哪个模型都一样 */
+    static final class BadRequestException extends RuntimeException {
+        BadRequestException(String message) { super(message); }
+    }
+
+    static final class Deployment {
+        final String name;
+        final Function<String, String> client;
+        int consecutiveFails;
+        long coolUntil;
+
+        Deployment(String name, Function<String, String> client) {
+            this.name = name;
+            this.client = client;
+        }
+    }
+
+    private final Map<String, List<Deployment>> routes = new LinkedHashMap<>();
+    private long now;
+
+    void register(String logicalModel, Deployment... chain) {
+        routes.put(logicalModel, List.of(chain));
+    }
+
+    void advance(long millis) { now += millis; }
+
+    /** 业务方只传逻辑模型名；网关按顺序尝试主模型和备用模型 */
+    String chat(String logicalModel, String prompt) {
+        List<String> trace = new ArrayList<>();
+        for (Deployment d : routes.get(logicalModel)) {
+            if (now < d.coolUntil) {
+                trace.add(d.name + ":cooling");
+                continue;                                 // 冷却期内直接跳过，不再去撞一个已知有问题的模型
+            }
+            for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+                try {
+                    String answer = d.client.apply(prompt);
+                    d.consecutiveFails = 0;
+                    trace.add(d.name + ":ok");
+                    return answer + "  <- " + trace;
+                } catch (RetryableException e) {
+                    trace.add(d.name + ":" + e.getMessage());
+                }
+            }
+            if (++d.consecutiveFails >= ALLOWED_FAILS) {
+                d.coolUntil = now + COOLDOWN_MILLIS;      // 连续失败达到阈值，进入冷却期
+            }
+        }
+        return "降级回复：系统繁忙  <- " + trace;
+    }
+
+    public static void main(String[] args) {
+        ModelGatewayDemo gateway = new ModelGatewayDemo();
+        boolean[] primaryDown = {false};
+        Deployment primary = new Deployment("primary", p -> {
+            if (p.isBlank()) { throw new BadRequestException("empty prompt"); }
+            if (primaryDown[0]) { throw new RetryableException("timeout"); }
+            return "主模型的回答";
+        });
+        Deployment backup = new Deployment("backup", p -> "备用模型的回答");
+        gateway.register("chat-default", primary, backup);
+
+        System.out.println("1. 正常            " + gateway.chat("chat-default", "hi"));
+        primaryDown[0] = true;
+        System.out.println("2. 主模型故障      " + gateway.chat("chat-default", "hi"));
+        System.out.println("3. 再次故障        " + gateway.chat("chat-default", "hi"));
+        System.out.println("4. 冷却期内        " + gateway.chat("chat-default", "hi"));
+        primaryDown[0] = false;
+        System.out.println("5. 已恢复但仍冷却  " + gateway.chat("chat-default", "hi"));
+        gateway.advance(COOLDOWN_MILLIS);
+        System.out.println("6. 冷却结束        " + gateway.chat("chat-default", "hi"));
+        try {
+            gateway.chat("chat-default", " ");
+        } catch (BadRequestException e) {
+            System.out.println("7. 请求本身有问题  直接抛出 " + e.getClass().getSimpleName() + "，不重试也不切换");
+        }
+    }
+}
+```
+
+```text
+1. 正常            主模型的回答  <- [primary:ok]
+2. 主模型故障      备用模型的回答  <- [primary:timeout, primary:timeout, backup:ok]
+3. 再次故障        备用模型的回答  <- [primary:timeout, primary:timeout, backup:ok]
+4. 冷却期内        备用模型的回答  <- [primary:cooling, backup:ok]
+5. 已恢复但仍冷却  备用模型的回答  <- [primary:cooling, backup:ok]
+6. 冷却结束        主模型的回答  <- [primary:ok]
+7. 请求本身有问题  直接抛出 BadRequestException，不重试也不切换
+```
+
+第 2、3 次请求各自在主模型上等了两次超时才切走；连续两次之后主模型进入冷却，第 4 次请求**直接走备用模型**，不再白等。这就是冷却期的作用：故障期间，每个请求都先去撞一次坏掉的模型，延迟会成倍增加。第 5 行说明冷却期没结束时，即使主模型已经恢复也不会切回去，这是恢复速度和稳定性之间的取舍。熔断器的原理见[《26 高可用》](../06-三高与架构/26-高可用.md)26-05。
+
+**现成的实现**。开源的 LiteLLM 是比较有代表性的一个（[路由文档](https://docs.litellm.ai/docs/routing)、[可靠性文档](https://docs.litellm.ai/docs/proxy/reliability)，2026-11 查阅）：
+
+- 路由策略：按权重随机（默认）、感知限流余量、按延迟、最少并发、最低成本、自定义；
+- 降级配置分为三类：上下文超长时的降级、内容策略拒绝时的降级、其他错误的通用降级，还可以设置全局默认的备用模型；
+- 支持重试次数、请求超时，以及"允许失败次数 + 冷却时间"的配置。
+
+除此之外，云厂商的模型平台和一些 API 网关也提供类似的 AI 网关能力。规模不大时，在应用里封装一个薄薄的客户端层也能起到同样的作用。
+
+**追问链**
+
+1. **流式响应输出到一半失败了，怎么办？**
+   这是模型网关和普通 API 网关最大的不同。内容已经有一部分发给了用户，网关没办法透明地换一个模型重来。可选的做法：
+   - 在**第一个 token 发出之前**的失败可以透明重试和切换，这覆盖了大部分故障；
+   - 已经开始输出之后失败，向客户端发送明确的错误事件，由前端提示用户重新生成；
+   - 对一致性要求高的场景不用流式，或者在服务端攒完整再下发。
+2. **限流应该按请求数还是按 token 数？**
+   两个都要，而且 token 更关键：一个带着长上下文的请求消耗的资源可能是普通请求的几百倍。难点是输出 token 数在请求结束前不知道，常见做法是"先按预估值扣减，结束后按实际值多退少补"。配额按应用隔离，避免一个批处理任务把所有人的额度用光。
+3. **网关会不会成为新的单点和瓶颈？**
+   会，所以它要无状态、多实例部署，限流计数放在 Redis 这类共享存储里。模型调用的延迟是秒级的，网关本身增加的几毫秒可以忽略；要注意的是网关的连接数和内存，因为每个流式请求都会占用一条长连接。应用侧还应该保留"网关不可用时直连"的应急开关。
+4. **切换到备用模型之后，提示词缓存还有效吗？**
+   无效。缓存是按模型和内容前缀匹配的，换了模型就要重新写入缓存，切换后的一段时间成本和延迟都会上升。同理，在多个部署之间轮询也可能降低缓存命中率，对缓存依赖重的应用应该让同一个会话尽量固定在同一个部署上。缓存的原理见 44-14。
+
+**生产实践 / 踩坑**
+
+- **重试层层叠加**：SDK 自带重试 2 次，应用代码又重试 3 次，网关再重试 3 次，一次用户请求最多变成几十次模型调用，在模型服务已经过载时雪上加霜。重试只在一层做，其余各层关掉，见[《26 高可用》](../06-三高与架构/26-高可用.md)26-07。
+- **备用模型从来没有真正用过**：故障时切过去才发现它不支持某个工具参数，或者输出的格式解析不了。备用链路要定期用一小部分真实流量或者评测集验证，见[《最佳实践 · AI 项目与 Agent 开发》](../最佳实践/02-AI项目与Agent开发最佳实践.md)A-14。
+- **日志里记录了完整的提示词和回答**：里面可能有用户的个人信息和业务数据。网关的日志要做脱敏和访问控制，保存期限按数据合规的要求设置，见 44-19。
+- **应用里写死了具体的模型版本**：模型下线或升级时要改几十个仓库。应用只使用逻辑模型名（比如"默认对话模型""低成本分类模型"），映射关系在网关上维护，变更时先用评测集验证。
+
+---
+
 ## 六、安全
 
 ### 44-18 什么是提示词注入？为什么不能只靠提示词来防？
@@ -2294,6 +2776,75 @@ flowchart TD
 
 ---
 
+### 44-30 自己部署大模型要懂哪些基础？首 Token 延迟、KV Cache、批处理分别是什么？
+
+> ★★ ｜ 架构师 ｜ 中频
+
+**考察意图**：本类不讲模型训练，但"数据不能出内网，模型要私有化部署"是很多企业的现实约束。面试官想确认你能和算法、运维同事对上话：知道延迟由什么决定、容量受什么限制、有哪些通用的优化手段。
+
+**30 秒版回答**：
+
+- **什么时候自己部署**：数据不允许离开自己的环境；调用量大且稳定，自建的单位成本更低；要用自己微调过的模型；对延迟的稳定性有硬性要求。否则优先用模型服务商的 API，省去 GPU 运维和容量规划。
+- **生成是一个 token 一个 token 进行的**，一次请求分两个阶段：
+  - **预填充**：把整个输入处理一遍。输入的所有 token 可以并行计算，耗时决定了**首 Token 延迟**；
+  - **解码**：每次生成一个 token，再把它接到输入后面生成下一个。耗时决定了**每个输出 token 的间隔**。
+- 所以：**总延迟 ≈ 首 Token 延迟 + 输出 token 数 × 每 token 间隔**。输入长主要拖慢首 Token，输出长主要拖慢总时间。
+- **KV Cache**：生成每个新 token 都要用到前面所有 token 的中间计算结果。把这些结果缓存下来，新 token 只需要算自己那一份，这就是 KV Cache。代价是它占显存，并且**随上下文长度线性增长**，所以一块 GPU 能同时服务多少请求，取决于"并发数 × 每个请求的上下文长度"。
+- 提高吞吐的三个通用手段：**连续批处理**（多个请求合在一起推理，请求可以随时加入和离开）、**前缀缓存**（相同的提示词前缀复用 KV Cache）、**量化**（降低权重的数值精度以节省显存）。
+
+**深入剖析**
+
+```mermaid
+flowchart TD
+    A["请求进入推理服务"] --> B["排队，等待进入批次"]
+    B --> C["预填充：并行处理全部输入 token<br/>生成这些 token 的 KV Cache"]
+    C --> D["输出第 1 个 token<br/>到这里的耗时就是首 Token 延迟"]
+    D --> E["解码：每一步只计算新 token<br/>复用并追加 KV Cache"]
+    E --> F{"遇到结束符<br/>或达到输出上限？"}
+    F -->|"否"| E
+    F -->|"是"| G["返回，释放这个请求占用的 KV Cache"]
+```
+
+**需要关注的指标**：
+
+| 指标 | 含义 | 主要受什么影响 |
+| --- | --- | --- |
+| 首 Token 延迟 | 从发出请求到收到第一个 token | 排队时间、输入长度、前缀缓存是否命中 |
+| 每 token 间隔 | 相邻两个输出 token 之间的时间 | 模型大小、硬件、同一批次里有多少请求 |
+| 吞吐 | 整个服务每秒生成多少 token | 批处理的效率、显存能容纳的并发 |
+| 显存占用 | 模型权重 + 所有在处理请求的 KV Cache | 模型参数量与精度、并发数、上下文长度 |
+
+延迟和吞吐是一对矛盾：批次越大，吞吐越高，但每个请求分到的计算变少，每 token 间隔变长。容量规划就是在"延迟要求"的约束下找最大吞吐。
+
+以开源推理服务 vLLM 为例，它的首页列出的特性正好对应上面这些概念（[vLLM 文档](https://docs.vllm.ai/en/latest/)，2026-11 查阅）：PagedAttention（按页管理 KV Cache 的显存，减少碎片）、连续批处理、前缀缓存、多种量化格式、与 OpenAI 兼容的 API 服务。
+
+**前缀缓存和提示词缓存是一回事**。vLLM 文档对自动前缀缓存的解释是：缓存已处理请求的 KV Cache，新请求如果有**相同的前缀**，就直接复用。文档同时说明它只减少预填充的时间，不减少解码的时间，所以回答很长、或者请求之间没有公共前缀时没有收益。这解释了为什么提示词要把**不变的内容放在前面**（系统提示词、工具定义、长文档），变化的内容放在后面：前缀只要有一个 token 不同，后面的缓存就全部用不上。应用侧怎么组织提示词见 44-14。
+
+**追问链**
+
+1. **为什么模型服务商的输出 token 比输入 token 贵？**
+   输入的 token 在预填充阶段可以并行处理，一次前向计算就完成；输出的 token 必须一个一个生成，每一个都要走一遍完整的计算。同样数量的 token，输出消耗的计算时间远多于输入。所以控制成本时，限制输出长度往往比压缩输入更有效。
+2. **并发一上来，首 Token 延迟为什么明显变长？**
+   两个原因：请求要排队等着进入批次；同一批次里别人的长输入做预填充时，会占用大量计算。常见的缓解手段是把长输入的预填充切成小块，和别的请求的解码步骤交替进行（vLLM 称之为 chunked prefill），以及把长上下文的请求和短请求分到不同的实例上。
+3. **量化会让模型变差吗？**
+   会有损失，程度取决于量化到多少位以及用什么方法。从 16 位降到 8 位，多数任务上的差别很小；降到 4 位，显存省得更多，但在需要精确推理的任务上更容易出错。结论不能照搬别人的评测，要**用自己的评测集对量化前后各跑一遍**再决定，见 44-20。
+4. **显存大概怎么估算？**
+   两部分相加：
+   - 权重：参数量 × 每个参数的字节数。16 位精度是 2 字节，8 位量化是 1 字节；
+   - KV Cache：与"层数 × 隐藏维度 × 上下文里的 token 数 × 并发数"成正比。
+   第二部分经常被低估：上下文窗口开到很大、并发又高时，KV Cache 占的显存可以超过权重本身。所以推理服务通常要设置最大上下文长度和最大并发，而不是让请求随意占用。
+5. **Java 应用怎么对接自己部署的模型？**
+   主流的推理服务都提供与 OpenAI 兼容的 HTTP 接口，Spring AI 或 LangChain4j 里使用 OpenAI 的客户端，把地址指向内部的服务即可。要注意的是工具调用和结构化输出：不同的开源模型对这两项的支持差别很大，要逐一验证，不能假设和商用模型的行为一致，见 44-17。
+
+**生产实践 / 踩坑**
+
+- **按 QPS 做压测和容量规划**：模型服务的负载取决于 token 数，不是请求数。同样是每秒 10 个请求，输入 500 个 token 和输入 50000 个 token 是完全不同的压力。压测要用**真实的输入、输出长度分布**，指标看每秒 token 数和各个延迟分位。
+- **不限制输出长度**：个别请求让模型生成到上限，长时间占着批次里的位置和显存，拖慢所有人。每个接口都要设置合理的输出上限和超时。
+- **把模型升级当成普通的版本发布**：换模型、换量化方式、换推理服务的版本，都可能改变输出。必须走"评测集回归 → 小流量灰度 → 全量"的流程，并且保留随时切回旧版本的能力。
+- **只有一个实例**：模型加载动辄几分钟，实例重启期间服务完全不可用。至少两个实例，并在网关上配置好降级到云端 API 或者降级回复的路径，见 44-29。
+
+---
+
 ## 八、Java 落地
 
 ### 44-23 Java 怎么落地：Spring AI 和 LangChain4j 怎么选？
@@ -2401,6 +2952,149 @@ Assistant assistant = AiServices.builder(Assistant.class)
 
 1. **框架把工具循环封装起来了，还需要懂底层吗？** 需要。出了问题要能看懂框架到底发了什么、收到了什么。Anthropic 也提醒过，对框架底层行为的错误假设，是常见的出错来源。
 2. **要直接用模型厂商的 Java SDK 吗？** 如果只对接一家模型，又需要用到厂商最新的特性（比如某些服务端工具），可以直接用官方 SDK；需要切换多家模型、统一抽象时，再用框架。
+
+---
+
+### 44-28 LangGraph 这类"状态图"编排框架解决什么问题？Java 里有哪些选择？
+
+> ★★ ｜ 资深 / 架构师 ｜ 中频
+
+**考察意图**：面试官常问"用过 LangGraph 吗"。即使没用过，也要能讲清图式编排的几个核心概念，判断什么时候需要它，并知道 Java 生态里对应的东西。
+
+**30 秒版回答**：
+
+- 状态图编排把 Agent 的流程表示成一张**有向图**：
+  - **节点**：一个步骤，可以是一次模型调用、一次工具调用，或者一段普通代码；
+  - **边**：执行完一个节点后去哪里。固定边直接指定下一个节点；**条件边**根据当前状态决定，循环和分支都靠它；
+  - **状态**：一份在所有节点之间共享的数据，节点读取它，并返回要更新的字段；
+  - **检查点**：每执行完一步，把状态持久化一次。
+- 有了显式的图和检查点，就能得到几样自己手写循环时很难做好的能力：**崩溃后从断点继续**、**在某个节点暂停等待人工审批**、**回到某个历史检查点重新执行**、把执行过程画出来。
+- 代表框架（2026-11 查阅各项目主页）：
+  - **LangGraph**（Python / JavaScript）：官方的定位是"用于长时间运行、有状态的 Agent 的底层编排框架和运行时"，主打持久化执行、人工介入、记忆和流式输出；
+  - **LangGraph4j**：思路相同的 Java 库，可以搭配 LangChain4j 或 Spring AI 使用，当前版本 1.9.9；
+  - **Spring AI Alibaba**：在 Spring AI 之上提供 Agent 框架，Graph 是它的底层运行时，内置顺序、并行、路由、循环几种多 Agent 编排，当前版本 1.1.2.x。
+- 什么时候需要：流程里有**循环、分支、人工介入，或者要跑很久**。一条直线的链式调用用普通代码就够了。
+
+**深入剖析**
+
+下面用不到一百行 JDK 代码实现一个最小的状态图引擎（本机 JDK 25 运行过），流程是"写文案 → 评审 → 不及格就重写 → 及格后发布"：
+
+```java
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.function.UnaryOperator;
+
+/**
+ * 状态图编排的最小实现：节点读写共享状态，边决定下一步，每一步之后保存检查点
+ */
+public final class MiniGraphDemo {
+
+    static final String END = "__end__";
+    private static final int MAX_STEPS = 10;
+    private static final int PASS_SCORE = 80;
+
+    /** 状态是不可变的 Map，节点返回"要更新的字段"，由引擎合并 */
+    record Checkpoint(int step, String nextNode, Map<String, Object> state) { }
+
+    private final Map<String, UnaryOperator<Map<String, Object>>> nodes = new HashMap<>();
+    private final Map<String, Function<Map<String, Object>, String>> edges = new HashMap<>();
+    private final List<Checkpoint> checkpoints = new ArrayList<>();
+
+    MiniGraphDemo node(String name, UnaryOperator<Map<String, Object>> action) {
+        nodes.put(name, action);
+        return this;
+    }
+
+    /** 固定边：执行完 from 一定去 to */
+    MiniGraphDemo edge(String from, String to) {
+        edges.put(from, state -> to);
+        return this;
+    }
+
+    /** 条件边：根据状态决定去哪里，循环就是靠它实现的 */
+    MiniGraphDemo conditionalEdge(String from, Function<Map<String, Object>, String> router) {
+        edges.put(from, router);
+        return this;
+    }
+
+    Map<String, Object> run(String start, Map<String, Object> input) {
+        Map<String, Object> state = Map.copyOf(input);
+        String current = start;
+        for (int step = 1; !END.equals(current); step++) {
+            if (step > MAX_STEPS) {
+                throw new IllegalStateException("step limit exceeded, node=" + current);   // 防止条件边写错导致死循环
+            }
+            Map<String, Object> merged = new HashMap<>(state);
+            merged.putAll(nodes.get(current).apply(state));
+            state = Map.copyOf(merged);
+            String next = edges.get(current).apply(state);
+            checkpoints.add(new Checkpoint(step, next, state));        // 每一步之后落一个检查点，崩溃后可以从这里恢复
+            System.out.println("step " + step + ": " + current + " -> " + next + "  state=" + new java.util.TreeMap<>(state));
+            current = next;
+        }
+        return state;
+    }
+
+    public static void main(String[] args) {
+        MiniGraphDemo graph = new MiniGraphDemo()
+                .node("draft", s -> {
+                    int round = (int) s.getOrDefault("round", 0) + 1;
+                    return Map.of("round", round, "draft", "第 " + round + " 版文案");
+                })
+                .node("review", s -> Map.of("score", (int) s.get("round") == 1 ? 60 : 90))   // 模拟评审模型：第一版不及格
+                .node("publish", s -> Map.of("published", true))
+                .edge("draft", "review")
+                .conditionalEdge("review", s -> (int) s.get("score") >= PASS_SCORE ? "publish" : "draft")
+                .edge("publish", END);
+        graph.run("draft", Map.of("topic", "双十一活动"));
+        System.out.println("检查点数量 = " + graph.checkpoints.size());
+    }
+}
+```
+
+```text
+step 1: draft -> review  state={draft=第 1 版文案, round=1, topic=双十一活动}
+step 2: review -> draft  state={draft=第 1 版文案, round=1, score=60, topic=双十一活动}
+step 3: draft -> review  state={draft=第 2 版文案, round=2, score=60, topic=双十一活动}
+step 4: review -> publish  state={draft=第 2 版文案, round=2, score=90, topic=双十一活动}
+step 5: publish -> __end__  state={draft=第 2 版文案, round=2, score=90, topic=双十一活动}
+检查点数量 = 5
+```
+
+第 2 步的条件边把流程送回了 `draft`，形成一次循环。每一步之后的检查点记录了"下一个要执行的节点"和完整的状态，进程在任意一步之后崩溃，都可以从最近的检查点接着跑。检查点和人工审批的完整实现见 44-15。
+
+框架在这个骨架之上补齐的是工程能力：
+
+| 能力 | 手写循环 | 图式框架 |
+| --- | --- | --- |
+| 分支和循环 | 写在 if / while 里，流程一复杂就难读 | 显式的条件边，可以导出成图 |
+| 断点续跑 | 自己设计状态的保存和恢复 | 内置检查点存储，可以换成数据库实现 |
+| 人工审批 | 自己实现暂停和恢复 | 在节点前后声明中断点 |
+| 并行节点 | 自己管理线程和结果合并 | 声明并行分支，由框架按规则合并状态 |
+| 流式输出、可观测 | 自己埋点 | 每个节点的开始、结束、输出都有事件 |
+
+**追问链**
+
+1. **它和 Temporal、Flowable 这类工作流引擎有什么区别？**
+   解决的是同一类问题（长流程、可恢复），侧重点不同。工作流引擎面向通用的业务流程，强调严格的持久化语义、定时器、补偿和大规模调度；图式 Agent 框架围绕模型调用设计，内置消息历史、工具调用、流式输出这些概念，持久化能力相对轻。流程特别长、对可靠性要求特别高的场景，常见的做法是用工作流引擎做外层的骨架，把每个 Agent 步骤当作其中的一个活动。
+2. **两个并行的节点同时修改状态里的同一个字段，怎么办？**
+   需要为这个字段定义**合并规则**。LangGraph 里叫 reducer：比如消息列表的规则是"追加"，计数器是"相加"，没有声明规则的字段，后一步的值会覆盖前一步的值；同一步里有多个并行节点写同一个没有合并规则的字段时，框架会报错而不是悄悄覆盖。设计状态时要想清楚哪些字段会被并行写入，否则会出现结果互相覆盖、时有时无的问题。
+3. **用图把流程固定下来，和让模型自己决定下一步，怎么取舍？**
+   图越细，流程越可控、越容易测试，但灵活性越低；完全交给模型的自主循环最灵活，也最难预测。实践中通常是混合的：**主干流程用图固定，某些节点内部是一个自主的 Agent 循环**。判断原则见 44-06：能事先确定的步骤就写死，只有确实需要模型临场判断的部分才交给模型。
+4. **Java 项目怎么选？**
+   - 流程简单，主要是"模型加工具"的循环：直接用 Spring AI 或 LangChain4j，见 44-23；
+   - 需要图、检查点、人工介入：在 LangGraph4j、Spring AI Alibaba 的 Graph、LangChain4j 的 agentic 模块（官方标注为实验性）里选，重点看它和现有技术栈的契合度、检查点存储是否支持你的数据库、版本是否稳定；
+   - 这个领域的框架迭代很快，接口经常变化。把框架的使用**隔离在一层薄薄的适配代码后面**，业务逻辑不直接依赖框架的类型。
+
+**生产实践 / 踩坑**
+
+- **把大对象放进状态**：检索到的整篇文档、文件内容、长长的工具结果都塞进状态，每一步的检查点都要把它们序列化一遍，存储和延迟都上去了。状态里只放引用（ID、路径），大对象放到外部存储。
+- **条件边没有兜底分支**：条件边根据模型的输出来路由，模型输出了一个意料之外的值，流程走到了不存在的节点。路由函数必须对未知值有默认的去向，通常是转人工或者结束。
+- **图里有循环却没有上限**：上面的例子里用 `MAX_STEPS` 兜底。"评审不通过就重写"这种循环，要同时限制轮数，超过后走降级路径，见 44-16。
+- **节点不是幂等的**：从检查点恢复时，上一次没执行完的节点会重新执行。节点里有写操作（发消息、扣款）时必须保证幂等，见 44-11。
 
 ---
 
