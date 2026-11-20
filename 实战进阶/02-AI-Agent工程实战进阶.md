@@ -404,7 +404,7 @@ semaphore(8)   max in-flight=  8, rejected(429)=  0, elapsed=730 ms
 - **批处理接口**：两家都提供批处理接口，价格是同步接口的一半。
   - Anthropic：大多数批次在 1 小时内完成，24 小时内没完成的请求会过期；一批最多 10 万个请求或 256 MB；结果保留 29 天；不受突增限制。
   - OpenAI：完成窗口目前只能设为 24 小时；有单独的排队配额，不占用普通的每分钟配额。
-- **结果按 ID 对回**：批处理结果的顺序和提交顺序不一定一致，每个请求带一个自定义 ID，按 ID 对回原始数据。失败和过期的部分单独重新提交，做法和[《项目工程开发最佳实践》](../最佳实践/01-项目工程开发最佳实践.md)的 E-28 一样。
+- **结果按 ID 对回**：OpenAI 的文档明确说明，输出的顺序可能和输入不一致。不管用哪一家，都不要依赖返回顺序：每个请求带一个自定义 ID（`custom_id`），按 ID 对回原始数据。失败和过期的部分单独重新提交，做法和[《项目工程开发最佳实践》](../最佳实践/01-项目工程开发最佳实践.md)的 E-28 一样。
 
 逻辑分池的效果（已运行，节选；令牌桶每秒补充 1000 token，用模拟时钟逐秒推进 60 秒）：
 
@@ -457,7 +457,7 @@ reserve 40% for online   online ok=20 rejected= 0 | batch ok= 36
 **依据**：
 
 - Anthropic [Batch processing](https://platform.claude.com/docs/en/build-with-claude/batch-processing)：五折价格、完成时间、单批上限、结果保留期；[Rate limits](https://platform.claude.com/docs/en/api/rate-limits)：批处理不受突增限制。
-- OpenAI [Batch API](https://developers.openai.com/api/docs/guides/batch)：五折价格、24 小时完成窗口、独立的排队配额。
+- OpenAI [Batch API](https://developers.openai.com/api/docs/guides/batch)：五折价格、24 小时完成窗口、独立的排队配额、输出顺序可能和输入不一致。
 - 演示代码，本机实测。
 
 ---
